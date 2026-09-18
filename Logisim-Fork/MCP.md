@@ -264,3 +264,28 @@ made Logisim create two damaged wires, which were repaired automatically, leavin
 Not carried over to the branch on purpose: this fork's Maven build, the editor
 config, the sample `.circ` files and the workspace notes; those belong to the
 `master` worktree, not to the 2.15.0.1 source line.
+
+### Packaging: jar and exe
+
+```powershell
+.\build-mcp.ps1 -Jar                  # the two jars
+.\build-mcp.ps1 -Jar -Exe             # ... and the Windows application image
+.\build-mcp.ps1 -Jar -Exe -Console    # ... with a console launcher (see below)
+```
+
+| Artifact | What it is |
+|---|---|
+| `build/dist/Logisim.jar` | the compiled classes plus the `resources` tree; use it with the jars from `libs/` on the classpath (`java -cp "Logisim.jar;libs/*" com.cburch.logisim.Main`) |
+| `build/dist/app/Logisim-jar-with-dependencies.jar` | the same with every dependency unpacked and a `Main-Class` manifest, so `java -jar … [-mcp]` works on its own |
+| `build/dist/Logisim/Logisim.exe` | a Windows application image: the fat jar plus a bundled runtime (roughly 60 MB in total) |
+
+All three were verified by driving the MCP handshake through them (`initialize` and
+`logisim_status`): each reported `2.15.0.1` and all 37 tools. Two things to know: a
+Windows launcher built without `-Console` is a GUI subsystem executable and therefore
+has no stdin/stdout, so for `-mcp` over stdio use the fat jar, or start the exe with
+`-mcp --transport tcp --port 7331`; and `-Exe` needs JDK 14 or newer for `jpackage`.
+
+Upstream releases are built differently: `master` and the 2.16.2.2 branch use Maven
+(`maven-jar-plugin`, `maven-assembly-plugin` and `launch4j-maven-plugin`, main class
+`com.cburch.logisim.Main`) and produce the committed `Compiled/Logisim-ITA.jar` and
+`Compiled/Logisim-ITA.exe`. Those are upstream's release files and were left alone.
