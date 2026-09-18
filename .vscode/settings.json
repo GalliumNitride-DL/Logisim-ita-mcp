@@ -1,0 +1,15 @@
+{
+  // The 2.15.0.1 tree has no Maven build (that came later), so keep the Maven and Gradle
+  // importers out of the way and describe the layout directly. Source and output paths are
+  // relative to this workspace folder, which is also the Eclipse project root (see .classpath).
+  "java.import.maven.enabled": false,
+  "java.import.gradle.enabled": false,
+  "java.project.sourcePaths": [
+    "Logisim-Fork",
+    "Logisim-Fork/resources"
+  ],
+  "java.project.referencedLibraries": [
+    "Logisim-Fork/libs/**/*.jar"
+  ],
+  "java.project.outputPath": "Logisim-Fork/build/jdt"
+}

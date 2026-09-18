@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+	Logisim 2.15.0.1 keeps the Eclipse layout: the Java sources are the "com" tree inside
+	Logisim-Fork, the runtime resources are Logisim-Fork/resources, and the third party jars
+	live in Logisim-Fork/libs. The original entries pointed at a JRE container named after the
+	maintainer's own JDK (jdk1.8.0_152) and at a user library called "libs"; neither exists on
+	another machine, which is what leaves every import in the workspace unresolvable. So the
+	jars are listed one by one, the JRE container is the generic one, and the compile output
+	goes to a build folder instead of next to the sources. The command line build is
+	Logisim-Fork/build-mcp.ps1.
+-->
 <classpath>
 	<classpathentry kind="src" path="Logisim-Fork"/>
-	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/jdk1.8.0_152"/>
-	<classpathentry exported="true" kind="con" path="org.eclipse.jdt.USER_LIBRARY/libs">
-		<attributes>
-			<attribute name="module" value="true"/>
-		</attributes>
-	</classpathentry>
-	<classpathentry kind="output" path="Logisim-Fork"/>
+	<classpathentry kind="src" path="Logisim-Fork/resources"/>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+	<classpathentry kind="lib" path="Logisim-Fork/libs/MRJAdapter.jar"/>
+	<classpathentry kind="lib" path="Logisim-Fork/libs/colorpicker.jar"/>
+	<classpathentry kind="lib" path="Logisim-Fork/libs/fontchooser.jar"/>
+	<classpathentry kind="lib" path="Logisim-Fork/libs/jh.jar"/>
+	<classpathentry kind="lib" path="Logisim-Fork/libs/gson-2.8.9.jar"/>
+	<classpathentry kind="output" path="Logisim-Fork/build/jdt"/>
 </classpath>

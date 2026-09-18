@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "logisim": {
+      "type": "stdio",
+      "command": "java",
+      "args": [
+        "-Xmx512m",
+        "-cp",
+        "d:\\gzr\\HUST2024\\AiC\\Logisim\\Logisim-Fork\\build\\classes;d:\\gzr\\HUST2024\\AiC\\Logisim\\Logisim-Fork;d:\\gzr\\HUST2024\\AiC\\Logisim\\Logisim-Fork\\libs\\*",
+        "com.cburch.logisim.Main",
+        "-mcp"
+      ],
+      "cwd": "d:\\gzr\\HUST2024\\AiC\\Logisim"
+    }
+  }
+}
