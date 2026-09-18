@@ -144,12 +144,44 @@ needs to change.
 
 | Transport | How | Use it for |
 |---|---|---|
-| `stdio` (default) | newline delimited JSON-RPC on stdin/stdout | the normal MCP client setup; the client starts the process |
-| `tcp` | `--transport tcp [--host 127.0.0.1] [--port N]` | attaching to an already running Logisim (see roadmap), or debugging with any JSON-RPC client |
+| `stdio` (default, headless) | newline delimited JSON-RPC on stdin/stdout | the normal MCP client setup; the client starts the process |
+| `http` | `--transport http [--host 127.0.0.1] [--port 7331]`, one JSON-RPC message per POST to `/mcp` | letting a client attach to a Logisim that is already running, which is how GUI mode works |
+| `tcp` | `--transport tcp [--host 127.0.0.1] [--port N]` | debugging with any JSON-RPC client, or a raw socket bridge |
 
 For stdio the server takes over `stdout` for the protocol and redirects
 Logisim's own diagnostics to `stderr`, because Logisim prints to `stdout` in
 about a hundred places and none of that may corrupt the protocol stream.
+
+### Streamable HTTP
+
+`--transport http` serves MCP's HTTP transport: the client `POST`s one JSON-RPC
+message to `http://127.0.0.1:7331/mcp`, the server answers with one
+`application/json` body, hands out an `Mcp-Session-Id` on `initialize` and echoes
+it afterwards. Notifications are answered `202`, `GET` is answered `405` (this
+server emits no server initiated messages, so there is no event stream), `DELETE`
+ends the session, a request whose `Accept` asks only for an event stream is
+answered `406`, and a request that does not come from this machine is answered
+`403` (the DNS rebinding check the specification asks for). VS Code configures it
+with a URL rather than a command:
+
+```json
+{
+  "servers": {
+    "logisim": { "type": "http", "url": "http://127.0.0.1:7331/mcp" }
+  }
+}
+```
+
+The server stays up until its stdin is closed or the process is stopped; the port
+can be chosen with `--port`.
+
+**Why HTTP and not stdio once a GUI is involved.** A window must not be the child
+of an MCP client: clients restart, and they kill the processes they started, which
+would take the user's unsaved work with it. With HTTP the user owns the lifetime of
+Logisim and a client can attach, drop and reattach freely. (There is a second,
+practical reason on Windows: an executable built with a Windows GUI header has no
+usable stdio, so a client could not talk to it that way at all.) Headless mode keeps
+stdio as its default, so nothing about the existing setup changes.
 
 ## VS Code
 

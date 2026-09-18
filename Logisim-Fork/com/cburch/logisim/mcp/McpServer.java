@@ -98,26 +98,34 @@ public class McpServer {
 			if (message.trim().isEmpty()) {
 				continue;
 			}
-			handle(message);
+			String reply = handleMessage(message);
+			if (reply != null) {
+				send(reply);
+			}
 		}
 	}
 
-	private void handle(String message) {
+	/**
+	 * Handles one JSON-RPC message and returns the reply that should be sent, or null
+	 * when the message needs no reply (a notification). Stream transports call this
+	 * through {@link #run()}; a request driven transport such as HTTP calls it once per
+	 * request, which is why it returns the reply instead of writing it.
+	 */
+	public String handleMessage(String message) {
 		JsonObject request;
 		try {
 			request = Json.parseObject(message);
 		} catch (Exception e) {
-			send(JsonRpc.error(null, JsonRpc.PARSE_ERROR, "invalid JSON: " + e.getMessage()));
-			return;
+			return Json.compact(JsonRpc.error(null, JsonRpc.PARSE_ERROR, "invalid JSON: " + e.getMessage()));
 		}
 
 		JsonElement id = Json.isPresent(request, "id") ? request.get("id") : null;
 		String method = Json.stringOrNull(request, "method");
 		if (method == null) {
 			if (id != null) {
-				send(JsonRpc.error(id, JsonRpc.INVALID_REQUEST, "message has no 'method' member"));
+				return Json.compact(JsonRpc.error(id, JsonRpc.INVALID_REQUEST, "message has no 'method' member"));
 			}
-			return;
+			return null;
 		}
 
 		JsonObject params = null;
@@ -130,18 +138,27 @@ public class McpServer {
 
 		if (id == null) {
 			handleNotification(method);
-			return;
+			return null;
 		}
 
 		try {
 			JsonElement result = dispatch(method, params);
-			send(JsonRpc.success(id, result));
+			return Json.compact(JsonRpc.success(id, result));
 		} catch (McpException e) {
-			send(JsonRpc.error(id, e.getCode(), e.getMessage()));
+			return Json.compact(JsonRpc.error(id, e.getCode(), e.getMessage()));
 		} catch (Throwable t) {
 			log.println("[logisim-mcp] internal error handling " + method + ": " + t);
 			t.printStackTrace(log);
-			send(JsonRpc.error(id, JsonRpc.INTERNAL_ERROR, McpSession.message(t)));
+			return Json.compact(JsonRpc.error(id, JsonRpc.INTERNAL_ERROR, McpSession.message(t)));
+		}
+	}
+
+	/** The name of the method in a request, for logging; null when it cannot be read. */
+	public static String methodOf(String message) {
+		try {
+			return Json.stringOrNull(Json.parseObject(message), "method");
+		} catch (Exception e) {
+			return null;
 		}
 	}
 
@@ -223,13 +240,17 @@ public class McpServer {
 			}
 		}
 		try {
+			long started = System.currentTimeMillis();
 			JsonElement result = tool.call(new ToolContext(session, name, arguments));
+			ActivityLog.record(name + " ok (" + (System.currentTimeMillis() - started) + " ms)");
 			return toolResult(result);
 		} catch (Throwable t) {
 			if (!(t instanceof McpException)) {
 				log.println("[logisim-mcp] tool " + name + " failed: " + t);
 				t.printStackTrace(log);
 			}
+			ActivityLog.record(name + " failed: "
+					+ (t instanceof McpException ? t.getMessage() : McpSession.message(t)));
 			return errorResult(t);
 		}
 	}
@@ -268,9 +289,9 @@ public class McpServer {
 		return ret;
 	}
 
-	private void send(JsonElement message) {
+	private void send(String reply) {
 		try {
-			transport.writeMessage(Json.compact(message));
+			transport.writeMessage(reply);
 		} catch (Exception e) {
 			log.println("[logisim-mcp] could not send a response: " + e);
 		}

@@ -61,10 +61,17 @@ MCP client ── stdio (client spawns the GUI) ─┐
 * **Everything on the EDT.** A small `EdtGate` runs each tool body on the EDT. When the EDT is busy with a
   modal dialog, a bounded wait returns a clear error ("Logisim is showing a dialog; dismiss it and retry")
   instead of wedging the agent forever. No tool ever calls `System.exit`, and no tool opens a dialog.
-* **Transports.** stdio stays (the client spawns Logisim, so the window appears on screen while the agent
-  talks over the pipe); **Streamable HTTP** on `127.0.0.1:7331` is added so a user who started Logisim by
-  hand can let an agent attach — VS Code's `mcp.json` supports `"type": "http"` with a `url`, so this needs
-  no bridge. One client at a time.
+* **Transports.** In GUI mode the server is **HTTP only** (`--transport http`, default port 7331;
+  `POST /mcp`, implemented already and verified independently of the GUI). stdio is deliberately not offered
+  with a window, and the reasons are not stylistic:
+  1. **A window must not be the child of a client.** MCP clients restart, and they kill the processes they
+     started — that would take the user's unsaved work with it. With HTTP the user owns Logisim's lifetime
+     and a client can attach, drop and reattach freely.
+  2. **Windows GUI executables have no usable stdio.** A client could not talk to the released `.exe` that
+     way at all.
+
+  Headless mode keeps stdio as its default, so the existing client setup is untouched. (If a stdio GUI is
+  ever wanted for a console build, it can be added later without disturbing anything.)
 * **No circuit semantics change.** Not one line of wire/circuit/simulation logic is touched: the agent uses
   the *same* actions the GUI uses, through `Project.doAction`.
 
@@ -130,8 +137,11 @@ format, existing menus and shortcuts, and the default startup path (no `-mcp`, n
 ## 8. Phases
 
 **Phase 1 — live mode without touching Logisim.**
-`--with-gui` entry, live project resolution, EDT gate, auto-highlight, the `gui_*` tools, instructions
-update, docs. The client spawns the GUI, so the user watches the same window the agent drives.
+The HTTP transport needed for it is **already implemented and verified** (`--transport http`, `McpServer`
+refactored to serve one request at a time over HTTP as well as streams). What remains: the `--with-gui`
+entry point, live project resolution, the EDT gate, auto-highlight, the `gui_*` tools, instructions update,
+docs. The user starts Logisim with the flag, presses nothing, and attaches a client to
+`http://127.0.0.1:7331/mcp`.
 *Verify:* headless regression suite unchanged; in live mode watch an edit, a circuit switch, a simulation,
 an undo; confirm a modal dialog no longer hangs the agent.
 
@@ -143,19 +153,23 @@ Streamable HTTP transport so a hand-started Logisim can be attached to.
 an MCP *resource* so an agent can "look" at it; optional "agent is here" overlay; an optional
 `begin_task`/`end_task` pair to group a burst of edits into one undo entry.
 
-## 9. Decisions I would like from you
+## 9. Decisions (agreed)
 
-1. **Agent opens a file** → new window (my default) or replace the current one?
-2. **May the agent close windows or start a new empty project** (which discards the open document)?
-   My default: no, and both are refused with an explanatory error unless enabled in Preferences.
-3. **Default when the GUI is started by hand**: serve HTTP on 7331 at startup, or start stopped and let the
-   user press Start? My default: start stopped, with the setting remembered.
-4. **Read-only by default?** My default: no (editing allowed), because Pause gives the user an immediate
-   brake and everything is undoable — but this is exactly the kind of thing you may want the other way.
-5. **Highlighting**: select the items of the last call (my default), or keep accumulating until the user
-   clicks? Accumulating would interfere with the user's own work, so I default to replacing the selection.
-6. **Heavy analysis** (§7.6): accept a short freeze, or invest in off-EDT analysis on a copy?
-7. **Grouping undo entries** per task (Phase 3) — wanted, or is per-call granularity right?
+1. **Agent opens a file** → a **new window** (never replaces the user's document).
+2. **The agent may not close windows or start a new empty project** (that would discard unsaved work); both
+   are refused with an explanatory error unless the user enables them.
+3. **A hand-started GUI serves nothing until the user starts it** from the MCP window (the setting is
+   remembered). Until that window exists, `--transport http` on the command line is the way in.
+4. **Read-only is off by default** — editing allowed, with Pause as the instant brake and every action
+   undoable.
+5. **Highlighting replaces the selection** with the items the last call touched; it does not accumulate.
+6. **Heavy analysis may freeze the window.** The user accepts this: a complex circuit is expected to cost
+   time, and the freeze is honest feedback rather than a hidden stall. No off-EDT analysis work is planned.
+   *(Implemented as: truth table calls keep their `max_inputs` cap and run on the EDT. If it turns out to be
+   painful in practice, revisit.)*
+7. **Grouped undo** — deferred. Revisit if a burst of edits turns out to be awkward to undo one by one.
+
+**Transport** — agreed: HTTP only in GUI mode, with the reasoning in §3; headless keeps stdio.
 
 ## 10. Testing
 

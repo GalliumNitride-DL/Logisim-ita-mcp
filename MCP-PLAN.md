@@ -76,7 +76,11 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 - **Headless-safe errors**: no modal dialogs; every failure is `isError: true` with the next step in the text.
 - **Analysis from the truth table** (`OutputExpressions` + `Implicant`), because `Analyze.computeExpression`
   is commented out in this fork — the same path the GUI's Analyze window uses.
-- **Two transports** (stdio, TCP) behind one interface; `System.out` is redirected to stderr in MCP mode.
+- **Two transports**, three ways in: stdio (client owns the process), Streamable HTTP (client attaches to a
+  running Logisim; `POST /mcp`, session id, 202/405/204/406/403 answered to specification) and TCP; one
+  interface behind all of them. `System.out` is redirected to stderr in MCP mode.
+- **Activity log**: every tool call is recorded with its outcome and duration (`ActivityLog`), which is what
+  the planned MCP window will show the user.
 - **Machine-readable rules**: the MCP `instructions` field carries a `READ THIS FIRST` block (no diagonal
   wires, 10-pixel grid, batch edits, how to react to a damaged circuit/file, heap and `skewed_wire_count`
   checks, verify electrically), and the four tools that can break a circuit repeat the relevant rule.
@@ -165,7 +169,11 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
    with `SwingUtilities.invokeAndWait`), no `System.exit` from the MCP path, and dialog-safe error handling.
    **Designed in [`MCP-GUI-DESIGN.md`](MCP-GUI-DESIGN.md)** — phased, with the exact Logisim-side additions
    named (an MCP window, a preferences tab, the `--with-gui` entry point), all of them additive UI/plumbing
-   and inert unless `-mcp` is passed.
+   and inert unless `-mcp` is passed. The open decisions are settled (new window per opened file, no window
+   closing or new-project by the agent, start stopped, read-only off by default, highlighting replaces the
+   selection, a freeze during heavy analysis is accepted, grouped undo deferred), and the transport is fixed
+   as **HTTP only with a window**, because a GUI must not be the child of a client and Windows GUI exes have
+   no stdio. The HTTP transport itself is already implemented and verified; live mode is what remains.
 9. **GUI-side health**: a "Repair broken wires" menu item and an on-open check, so the GUI can rescue a
    damaged file by itself (a safety net once P0.1 lands).
 10. **Observability**: `logisim_screenshot` (PNG of a circuit or region) and `logisim_sim_trace` (values of

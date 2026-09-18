@@ -108,11 +108,14 @@ public final class McpMain {
 
 		String transport = options.containsKey("transport") ? options.get("transport") : "stdio";
 		try {
+			if ("http".equalsIgnoreCase(transport)) {
+				return serveHttp(session, options, log);
+			}
 			if ("tcp".equalsIgnoreCase(transport) || "socket".equalsIgnoreCase(transport)) {
 				return serveTcp(session, options, log);
 			}
 			if (!"stdio".equalsIgnoreCase(transport)) {
-				log.println("[logisim-mcp] unknown transport '" + transport + "'; use stdio or tcp");
+				log.println("[logisim-mcp] unknown transport '" + transport + "'; use stdio, tcp or http");
 				return 2;
 			}
 			return serveStdio(session, protocolOut, log);
@@ -131,6 +134,44 @@ public final class McpMain {
 		log.println("[logisim-mcp] serving MCP over stdio; " + registry.size() + " tools available");
 		new McpServer(transport, session, registry, log).run();
 		log.println("[logisim-mcp] client closed the connection; exiting");
+		return 0;
+	}
+
+	/**
+	 * Serves MCP over Streamable HTTP, which is how an already running Logisim is
+	 * driven: the client connects to a URL instead of owning the process. Used by
+	 * headless mode today and by GUI mode once that is enabled, which is why it is a
+	 * method rather than part of the stdio path.
+	 */
+	private static int serveHttp(McpSession session, Map<String, String> options, PrintStream log) throws Exception {
+		String host = options.containsKey("host") ? options.get("host") : "127.0.0.1";
+		int port = 7331;
+		if (options.containsKey("port")) {
+			try {
+				port = Integer.parseInt(options.get("port").trim());
+			} catch (NumberFormatException e) {
+				log.println("[logisim-mcp] invalid --port value: " + options.get("port"));
+				return 2;
+			}
+		}
+		ToolRegistry registry = registry(session, "http");
+		McpHttpServer server = new McpHttpServer(session, registry, host, port, log);
+		log.println("[logisim-mcp] serving MCP over http on " + server.url() + "; " + registry.size()
+				+ " tools available (close stdin to stop)");
+		if (options.containsKey("wait") && "false".equalsIgnoreCase(options.get("wait"))) {
+			return 0;
+		}
+		try {
+			// Stay alive until the caller closes stdin or the process is stopped. This
+			// gives a client that spawned the process a way to end it, and lets a user
+			// started server run as long as the window does.
+			while (System.in.read() >= 0) {
+				// any input is ignored; only the end of the stream matters
+			}
+		} catch (Exception e) {
+			// stdin is not usable: keep serving until the process is stopped
+		}
+		server.close();
 		return 0;
 	}
 
@@ -262,11 +303,16 @@ public final class McpMain {
 		return "Logisim MCP server\n"
 				+ "  java -jar Logisim.jar -mcp [options] [file.circ]\n"
 				+ "options:\n"
-				+ "  --transport stdio|tcp   how to talk to the MCP client (default stdio)\n"
-				+ "  --host ADDRESS          TCP bind address (default 127.0.0.1)\n"
-				+ "  --port NUMBER           TCP port, 0 picks a free one (default 0)\n"
-				+ "  --once                  TCP mode: exit after the first client disconnects\n"
-				+ "  --file PATH             open this .circ file at startup\n"
-				+ "  --help                  print this text";
+				+ "  --transport stdio|tcp|http  how to talk to the MCP client (default stdio)\n"
+				+ "  --host ADDRESS              bind address (default 127.0.0.1)\n"
+				+ "  --port NUMBER               port; 0 picks a free one for tcp (default 0, http 7331)\n"
+				+ "  --once                      TCP mode: exit after the first client disconnects\n"
+				+ "  --file PATH                 open this .circ file at startup\n"
+				+ "  --help                      print this text\n"
+				+ "\n"
+				+ "http mode serves one JSON-RPC message per POST to http://host:port/mcp and\n"
+				+ "stays up until stdin is closed or the process is stopped. It is the transport\n"
+				+ "for letting an agent attach to a Logisim that the user started (GUI mode),\n"
+				+ "because a window must not be the child of a client.";
 	}
 }
