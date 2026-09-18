@@ -12,10 +12,13 @@
 #   ./build-mcp.ps1 -Exe       also build the fat jar and wrap it as a Windows
 #                              application image: build/dist/Logisim/Logisim.exe
 #                              (jpackage, JDK 14+, bundles its own runtime)
-#   ./build-mcp.ps1 -Console   make the -Exe launcher a console one. Needed only for
-#                              MCP over stdio through the exe: a plain Windows launcher
-#                              has no stdio, so there use the fat jar instead, or run
-#                              the exe with -mcp --transport tcp --port 7331
+#   ./build-mcp.ps1 -Console   make the exe launchers console ones. Needed only for
+#                              MCP over stdio through an exe: a plain Windows launcher
+#                              has no stdio, so for stdio use the fat jar, run the exe
+#                              with -mcp --transport tcp --port 7331, or build with
+#                              -Console. HTTP (and --with-gui) needs no console: the
+#                              server notices there is no stdin and serves until it is
+#                              stopped, so the plain exe is a working MCP server.
 #   ./build-mcp.ps1 -Single    one exe file with the fat jar wrapped inside it
 #                              (build/dist/Logisim-ITA.exe, launch4j), the same shape
 #                              as the released Compiled/Logisim-ITA.exe. It needs a
@@ -67,15 +70,17 @@ try {
     $count = (Get-Content $list).Count
 
     Write-Host "compiling $count sources with $javac"
-    # javac writes its "Note: ..." lines to stderr. With the strict preference above, and
-    # also when a caller pipes this script's output, PowerShell turns that into a
-    # terminating error, so relax it around the native calls and judge success by the
-    # exit code instead.
+    # javac writes its "Note: ..." lines to stderr. With the strict preference above a
+    # native stderr line becomes a terminating error, and even when it does not, a caller
+    # piping this script's output gets a red NativeCommandError block for what is only a
+    # note. So relax the preference around the call, re-emit the lines as ordinary text,
+    # and judge success by the exit code - real compiler errors still come through.
     $strict = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $javac -source 8 -target 8 -encoding UTF-8 -nowarn -d $out -cp "libs/*" "@$list"
+    $output = & $javac -source 8 -target 8 -encoding UTF-8 -nowarn -d $out -cp "libs/*" "@$list" 2>&1
     $code = $LASTEXITCODE
     $ErrorActionPreference = $strict
+    foreach ($line in $output) { Write-Output "$line" }
     if ($code -ne 0) { throw "compilation failed: javac exited with $code" }
     Write-Host "ok: $out ($count sources)"
 
@@ -196,8 +201,10 @@ $iconXml
 
         & java "-cp" "$tools\*" net.sf.launch4j.Main $config | Select-String -Pattern 'Successfully created'
         if ($LASTEXITCODE -ne 0) { throw "launch4j failed" }
-        $exe = Join-Path $dist "Logisim-ITA.exe"
-        Write-Host ("ok: {0} ({1:N1} MB, jar wrapped inside)" -f $exe, ((Get-Item $exe).Length / 1MB))
+        # NB: not $exe - PowerShell variable names are case-insensitive, so that would be
+        # the [switch]$Exe parameter and assigning a path to it fails.
+        $exePath = Join-Path $dist "Logisim-ITA.exe"
+        Write-Host ("ok: {0} ({1:N1} MB, jar wrapped inside)" -f $exePath, ((Get-Item $exePath).Length / 1MB))
     }
 
     if ($Run) {

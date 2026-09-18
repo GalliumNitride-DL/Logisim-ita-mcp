@@ -98,6 +98,15 @@ public class Main {
 					JOptionPane.showMessageDialog(null, result.toString());
 					System.exit(-1);
 				}
+				// MCP: the windows exist now, so a server asked for on the command line
+				// (--with-gui) or configured to start automatically can be shown/listened on.
+				if (com.cburch.logisim.mcp.McpMain.needsGuiHook()) {
+					try {
+						com.cburch.logisim.gui.mcp.McpFrame.onGuiReady();
+					} catch (Throwable t) {
+						System.err.println("[logisim-mcp] could not finish MCP startup: " + t);
+					}
+				}
 			} else {
 				if (AppPreferences.SEND_DATA.getBoolean())
 					Startup.runRemotePhpCode(

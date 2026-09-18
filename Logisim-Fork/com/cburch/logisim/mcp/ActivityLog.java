@@ -58,4 +58,9 @@ public final class ActivityLog {
 	public static int size() {
 		return ENTRIES.size();
 	}
+
+	/** Empties the log; the MCP window offers this to the user. */
+	public static void clear() {
+		ENTRIES.clear();
+	}
 }

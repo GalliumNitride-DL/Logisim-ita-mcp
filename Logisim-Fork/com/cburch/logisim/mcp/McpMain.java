@@ -120,18 +120,17 @@ public final class McpMain {
 					+ "' is ignored (headless mode supports stdio and tcp)");
 		}
 
-		final McpSession session = new McpSession();
-		session.setLive(true);
 		final String boundHost = host;
 		final int boundPort = port;
+		// the command line wins: the auto-start setting must not try a second bind while
+		// this thread is still coming up
+		guiServerRequested = true;
 		Thread server = new Thread(new Runnable() {
 			@Override
 			public void run() {
 				try {
-					ToolRegistry registry = registry(session, "http (gui)");
-					McpHttpServer http = new McpHttpServer(session, registry, boundHost, boundPort, System.err);
-					lastHttp = http;
-					System.err.println("[logisim-mcp] watching this window over MCP on " + http.url());
+					startServer(boundHost, boundPort);
+					System.err.println("[logisim-mcp] watching this window over MCP on " + serverUrl());
 				} catch (Throwable t) {
 					System.err.println("[logisim-mcp] could not start the MCP server on " + boundHost + ":" + boundPort
 							+ ": " + McpSession.message(t) + " (the window keeps working; set --port to another port)");
@@ -140,14 +139,114 @@ public final class McpMain {
 		}, "logisim-mcp-http");
 		server.setDaemon(true);
 		server.start();
+		openWindowWhenReady = true;
 		return stripMcpOptions(args, options);
 	}
 
-	/** The HTTP server of a GUI run, so a window can report on it later. */
+	// ------------------------------------------------------------------
+	// the server, as the MCP window sees it
+	// ------------------------------------------------------------------
+
+	/** The HTTP server of a GUI run, or null while none is running. */
 	private static volatile McpHttpServer lastHttp;
+
+	/** The session the running server serves, so the window can flip its switches. */
+	private static volatile McpSession lastSession;
+
+	/** True when a window asked to be shown once the GUI exists. */
+	private static volatile boolean openWindowWhenReady;
+
+	/** True when the command line asked for a server, so the setting stays out of the way. */
+	private static volatile boolean guiServerRequested;
 
 	public static McpHttpServer httpServer() {
 		return lastHttp;
+	}
+
+	public static McpSession session() {
+		return lastSession;
+	}
+
+	public static boolean isServerRunning() {
+		return lastHttp != null;
+	}
+
+	public static String serverUrl() {
+		McpHttpServer http = lastHttp;
+		return http == null ? null : http.url();
+	}
+
+	/**
+	 * Starts the server for a running Logisim window. The session is a live one: it
+	 * serves whichever window the user is in, and the switches in the MCP window
+	 * (read-only, pause) apply to it.
+	 */
+	public static synchronized McpHttpServer startServer(String host, int port) throws Exception {
+		McpHttpServer running = lastHttp;
+		if (running != null) {
+			return running;
+		}
+		McpSession session = new McpSession();
+		session.setLive(true);
+		session.setReadOnly(McpSettings.isReadOnlyAtStart());
+		if (McpSettings.isPausedAtStart()) {
+			session.setPaused(true, "paused at start by the settings", true);
+		}
+		ToolRegistry registry = registry(session, "http (gui)");
+		McpHttpServer http = new McpHttpServer(session, registry, host, port, System.err);
+		lastSession = session;
+		lastHttp = http;
+		ActivityLog.record("server started on " + http.url());
+		return http;
+	}
+
+	public static McpHttpServer startServer(int port) throws Exception {
+		return startServer("127.0.0.1", port);
+	}
+
+	public static synchronized void stopServer() {
+		McpHttpServer running = lastHttp;
+		lastHttp = null;
+		lastSession = null;
+		if (running != null) {
+			running.close();
+			System.err.println("[logisim-mcp] server stopped");
+		}
+	}
+
+	/** Asks for the MCP window to be shown as soon as the GUI is up. */
+	public static void requestWindow() {
+		openWindowWhenReady = true;
+	}
+
+	/** True once, when a window should be shown now. */
+	public static boolean consumeWindowRequest() {
+		boolean value = openWindowWhenReady;
+		openWindowWhenReady = false;
+		return value;
+	}
+
+	/** Whether a plain GUI start has anything MCP to do once the windows exist. */
+	public static boolean needsGuiHook() {
+		return isServerRunning() || guiServerRequested || openWindowWhenReady || McpSettings.isAutoStart();
+	}
+
+	/**
+	 * Called once the GUI exists: honours the "start the server when Logisim starts"
+	 * setting. Quiet by design - the user opens the window to look.
+	 */
+	public static void maybeStartOnStartup() {
+		if (isServerRunning() || guiServerRequested || !McpSettings.isAutoStart()) {
+			return;
+		}
+		try {
+			startServer(McpSettings.getPort());
+			System.err.println("[logisim-mcp] serving this window on " + serverUrl()
+					+ " (started by the MCP setting; open Help | MCP Server to see it)");
+		} catch (Throwable t) {
+			System.err.println("[logisim-mcp] could not start the MCP server on port " + McpSettings.getPort() + ": "
+					+ McpSession.message(t));
+		}
 	}
 
 	/** The command line with our own options taken out, keeping any file to open. */
@@ -263,7 +362,7 @@ public final class McpMain {
 		ToolRegistry registry = registry(session, "http");
 		McpHttpServer server = new McpHttpServer(session, registry, host, port, log);
 		log.println("[logisim-mcp] serving MCP over http on " + server.url() + "; " + registry.size()
-				+ " tools available (close stdin to stop)");
+				+ " tools available (close stdin to end it, or stop the process)");
 		if (options.containsKey("wait") && "false".equalsIgnoreCase(options.get("wait"))) {
 			return 0;
 		}
@@ -271,11 +370,28 @@ public final class McpMain {
 			// Stay alive until the caller closes stdin or the process is stopped. This
 			// gives a client that spawned the process a way to end it, and lets a user
 			// started server run as long as the window does.
-			while (System.in.read() >= 0) {
-				// any input is ignored; only the end of the stream matters
+			//
+			// Careful: a launcher with a Windows GUI header (our own -Single exe, javaw,
+			// a service, a scheduled task) hands us no stdin at all, so the very first
+			// read says end-of-file. Treating that as a stop request made the packaged
+			// exe exit the instant it started, silently serving nothing. An empty
+			// end-of-file that arrives within a moment of starting to wait therefore
+			// means "there is no stdin": serve until the process is stopped instead.
+			long waited = System.currentTimeMillis();
+			int first = System.in.read();
+			if (first >= 0 || System.currentTimeMillis() - waited >= 2000) {
+				while (first >= 0 && System.in.read() >= 0) {
+					// any input is ignored; only the end of the stream matters
+				}
+			} else {
+				log.println("[logisim-mcp] no stdin to watch; serving until the process is stopped");
+				new java.util.concurrent.CountDownLatch(1).await();
 			}
 		} catch (Exception e) {
-			// stdin is not usable: keep serving until the process is stopped
+			// stdin cannot be read at all: keep serving until the process is stopped
+			log.println("[logisim-mcp] stdin cannot be watched (" + McpSession.message(e)
+					+ "); serving until the process is stopped");
+			new java.util.concurrent.CountDownLatch(1).await();
 		}
 		server.close();
 		return 0;

@@ -41,6 +41,9 @@ class MenuHelp extends JMenu implements ActionListener {
 	private JMenuItem forum = new JMenuItem();
 	private JMenuItem update = new JMenuItem();
 	private JMenuItem about = new JMenuItem();
+	// Logisim-MCP: the only trace of the MCP feature in Logisim's own menus. The window it
+	// opens holds everything else (server controls, read-only, pause, activity log).
+	private JMenuItem mcp = new JMenuItem();
 	private HelpSet helpSet;
 	private String helpSetUrl = "";
 	private JHelp helpComponent;
@@ -59,6 +62,7 @@ class MenuHelp extends JMenu implements ActionListener {
 		forum.addActionListener(this);
 		update.addActionListener(this);
 		about.addActionListener(this);
+		mcp.addActionListener(this);
 
 		add(tutorial);
 		add(guide);
@@ -71,6 +75,9 @@ class MenuHelp extends JMenu implements ActionListener {
 			add(update);
 			add(about);
 		}
+
+		addSeparator();
+		add(mcp);
 	}
 
 	@Override
@@ -109,6 +116,8 @@ class MenuHelp extends JMenu implements ActionListener {
 
 		} else if (src == about) {
 			About.showAboutDialog(menubar.getParentWindow());
+		} else if (src == mcp) {
+			com.cburch.logisim.gui.mcp.McpFrame.showWindow();
 		}
 	}
 
@@ -167,6 +176,8 @@ class MenuHelp extends JMenu implements ActionListener {
 		forum.setText(Strings.get("Forum"));
 		about.setText(Strings.get("helpAboutItem"));
 		update.setText(Strings.get("CheckUpdates"));
+		// literal on purpose: adding an MCP feature should not mean editing Logisim's bundles
+		mcp.setText("MCP Server...");
 		if (helpFrame != null) {
 			helpFrame.setLocale(Locale.getDefault());
 			loadBroker();

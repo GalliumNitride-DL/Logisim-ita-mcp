@@ -173,7 +173,10 @@ with a URL rather than a command:
 ```
 
 The server stays up until its stdin is closed or the process is stopped; the port
-can be chosen with `--port`.
+can be chosen with `--port`. A launcher that hands the process **no stdin at all** - a
+Windows GUI-subsystem exe, `javaw`, a service, a scheduled task - is recognised (the first
+read fails, or reports end-of-file straight away) and the server then serves until the
+process is stopped instead of exiting on the spot, which is what a packaged exe needs.
 
 **Why HTTP and not stdio once a GUI is involved.** A window must not be the child
 of an MCP client: clients restart, and they kill the processes they started, which
@@ -193,7 +196,8 @@ java -cp "build/classes;.;libs/*" com.cburch.logisim.Main -mcp --with-gui [--por
 exactly as it always does, and the agent works on the project the user is looking at
 instead of on a project of its own. The transport is HTTP (see above); the port defaults
 to 7331 and the URL is printed on stderr at startup. Point a client at it with
-`{"type": "http", "url": "http://127.0.0.1:7331/mcp"}`.
+`{"type": "http", "url": "http://127.0.0.1:7331/mcp"}`. `--with-gui` also opens the MCP
+window so the address is visible.
 
 What the user sees, without reading a line of JSON:
 
@@ -205,6 +209,43 @@ What the user sees, without reading a line of JSON:
 * simulation values change colour live when the agent pokes inputs or ticks the clock;
 * opening a file brings up a new window; the activity log (also shown by
   `logisim_gui_status`) records every call with its outcome and duration.
+
+### The MCP window
+
+**Help | MCP Server…** opens it, and it holds everything MCP related - one window, three
+tabs:
+
+| Tab | What is there |
+|---|---|
+| **Server** | whether the server is stopped or listening, the URL, whether a client is attached, requests and tool calls so far, the address and port, **Start** / **Stop** / **Copy URL**, and an **auto-start** checkbox |
+| **Connect** | a ready-made configuration for your client, built from the address the server actually answers on: pick the client, then **Copy** (or **Save…** to write `mcp.json` / `claude_desktop_config.json`) |
+| **Control** | the **read-only** and **pause** switches (with the reason the agent is shown while paused) and a line summarising both |
+| **Activity** | the tail of every tool call with its outcome and duration, refreshed once a second, with **Clear** |
+
+The **Connect** tab exists because the fiddly part of attaching an agent is the client's own
+configuration file, not the server. It offers, for the live address:
+
+* **VS Code** - the `servers` form, for `.vscode/mcp.json` or the user-level config
+  (Command Palette ▸ *MCP: Open User Configuration*);
+* **Claude Desktop** - the `mcpServers` form with an `npx mcp-remote` bridge, since that client
+  speaks stdio;
+* **Any MCP client** - the same HTTP configuration under the `mcpServers` key;
+* **A client that launches Logisim** - a headless stdio entry (`java -jar ... -mcp`, or the
+  classpath form when running from `build/classes`), for clients that start the server themselves;
+* **Prove the server answers** - a `curl` one-liner for Git Bash, WSL or a POSIX shell.
+
+Each choice says where the snippet goes and what to do afterwards, and the snippets follow the
+address: start or stop the server and they are rebuilt, so the port is never guessed.
+
+The settings - auto-start, port, read-only at start, paused at start - are remembered in
+the platform preference store under the MCP package's own node, so they apply to the next
+session and need no command line. With **auto-start** on, simply launching Logisim brings
+the server up (one line on stderr, no window); a newly created session then starts
+read-only or paused if you asked for that, which is a safe way to let an agent look
+before it is allowed to touch anything.
+
+A pause or read-only state set **from the window** belongs to the user: the agent is told
+to ask them to release it, and `logisim_gui_pause` cannot undo it.
 
 ### The tools that only exist with a window
 
@@ -393,17 +434,20 @@ config, the sample `.circ` files and the workspace notes; those belong to the
 | `build/dist/Logisim/Logisim.exe` | a `jpackage` application image instead: the fat jar next to a bundled runtime, roughly 60 MB in the folder, nothing else needed on the machine |
 
 All of them were verified by driving the MCP handshake through them (`initialize` and
-`logisim_status`): each reported `2.15.0.1` and all 37 tools. The single exe was
+`logisim_status`): each reported `2.15.0.1` and all 45 tools. The single exe was
 checked deliberately from a directory that does **not** contain the jar, which is what
 proves the jar really is inside it.
 
 Two things to know. A Windows launcher built without `-Console` is a GUI subsystem
-executable and therefore has no stdin/stdout, so for `-mcp` over stdio either run the
-exe with `-mcp --transport tcp --port 7331`, or use the fat jar, or rebuild with
-`-Console`. And `-Exe` needs JDK 14 or newer for `jpackage`, while `-Single` needs the
-launch4j tooling: it is not part of this tree (the 2.16.2.2 branch gets it through
-Maven), so the script stages it out of the local Maven cache - `net.sf.launch4j:launch4j`
-plus its win32 workdir and `com.thoughtworks.xstream:xstream`. Nothing is downloaded.
+executable and therefore has no stdin/stdout. That is fine for the server: started as
+`Logisim-ITA.exe -mcp --transport http --port 7331` it notes there is no stdin to watch and
+serves until the process is stopped (verified with the plain, non-console exe - also from a
+foreign working directory). Only `-mcp` over **stdio** needs a console, so there either use
+`-Console`, run the fat jar with `java -jar`, or point the client at `--transport tcp`. And
+`-Exe` needs JDK 14 or newer for `jpackage`, while `-Single` needs the launch4j tooling: it
+is not part of this tree (the 2.16.2.2 branch gets it through Maven), so the script stages it
+out of the local Maven cache - `net.sf.launch4j:launch4j` plus its win32 workdir and
+`com.thoughtworks.xstream:xstream`. Nothing is downloaded.
 
 Upstream releases are built differently: `master` and the 2.16.2.2 branch use Maven
 (`maven-jar-plugin`, `maven-assembly-plugin` and `launch4j-maven-plugin`, main class

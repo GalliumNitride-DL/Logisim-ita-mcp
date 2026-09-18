@@ -101,8 +101,8 @@ existing-behaviour code paths, and all are inert unless `-mcp` is passed.
 | # | Change | File(s) | Why | Size |
 |---|---|---|---|---|
 | A | Accept `--with-gui`: start the server on a background thread, then continue into the normal GUI startup | `Main.java` (a few lines), `McpMain.java` (new mode) | entry point for live mode | tiny |
-| B | An **"MCP Server…" window**: state (stopped / listening on host:port / client connected / tool count), Start and Stop buttons, port field, **Read-only** toggle, **Pause** button, and a log tail of the last tool calls | new `com/cburch/logisim/gui/mcp/*`, plus one item in the Tools menu (`gui/menu/MenuTools.java` or `MenuHelp.java`) | the user needs to see and control the server; Logisim has no status bar, and the MCP client's own log is in another application | new package + one menu line |
-| C | An **MCP tab** in Preferences (enable, transport, port, allow file operations, highlight edits, log level), persisted | new `gui/prefs/McpOptions.java`, one entry in the `panels` array in `gui/prefs/PreferencesFrame.java`, a few `AppPreferences` attributes | persist settings and make the feature discoverable | small |
+| B | An **"MCP Server…" window**: state (stopped / listening on host:port / client connected / request and call counts), Start / Stop / Copy URL, host and port fields, an **auto-start** checkbox, a **Read-only** toggle, a **Pause** toggle with the reason the agent is shown, and a log tail of the last calls | new `com/cburch/logisim/gui/mcp/McpFrame.java`, plus one item in the Help menu (`gui/menu/MenuHelp.java`) | the user needs to see and control the server; Logisim has no status bar, and the MCP client's own log is in another application | new package + 6 menu lines |
+| C | Settings for the above (auto-start, port, read-only at start, paused at start), persisted | new `com/cburch/logisim/mcp/McpSettings.java`, backed by `java.util.prefs` under the MCP package's own node | persist settings and make the feature discoverable | new file, **no** `AppPreferences`/`PreferencesFrame` edits |
 | D | *(optional, later)* an overlay in `Canvas` to draw an "agent is working here" marker | `gui/main/Canvas.java` | prettier than using the real selection | skip for now |
 | E | *(optional, later)* an activity line inside the main window | `gui/main/Frame.java` | keeps everything in one window | skip for now |
 
@@ -158,9 +158,49 @@ the activity log records each call.
 *Verify next:* the same in a hand-started window with a client attached over HTTP after a client
 restart, a modal dialog open (expect the deadline error), and two windows open (focus switching).
 
-**Phase 2 — the user-facing controls (needs the core additions B and C).**
-MCP window (state, Start/Stop, port, read-only, pause, log tail), MCP preferences tab, and the
-Streamable HTTP transport so a hand-started Logisim can be attached to.
+**Phase 2 — the user-facing controls (DONE).**
+Implemented as **one window with sub-tabs**, so that everything MCP owns is in one place: **Server**
+(state, client, counters, address, port, Start / Stop / Copy URL, auto-start checkbox), **Connect**
+(a ready-made client configuration - VS Code, Claude Desktop over an `mcp-remote` bridge, any HTTP
+client, a headless stdio entry, and a `curl` test - built from the address the server actually
+answers on, with Copy and Save), **Control**
+(read-only, pause + the reason the agent is shown, and a one-line summary of both), **Activity** (the
+`ActivityLog` tail, refreshed once a second, plus Clear). One menu item opens it — **Help | MCP
+Server…** — and it is a singleton window: opening it again just raises it.
+
+Settings (auto-start, port, read-only at start, paused at start) live in the platform preference store
+under the MCP package's own node (`McpSettings`), *not* in `AppPreferences`, and the window's strings
+are literals rather than `Strings.get` bundle entries: both choices are deliberate, since neither
+Logisim's settings machinery nor its resource bundles should have to grow for this feature. The core
+therefore only gained a menu item and a startup call.
+
+Logisim-side footprint actually used (out of the additive exceptions above):
+
+| File | Change | Lines |
+|---|---|---|
+| `gui/mcp/McpFrame.java` | new window (the whole UI) | new file |
+| `mcp/McpSettings.java` | persisted settings | new file |
+| `mcp/McpMain.java` | server lifecycle for the window (`startServer`, `stopServer`, `session`, `serverUrl`), `--with-gui` requests the window, `maybeStartOnStartup`, `needsGuiHook` | MCP-layer only |
+| `mcp/ActivityLog.java` | `clear()` | 1 |
+| `gui/menu/MenuHelp.java` | one item, one listener line, one `add`, one label, one action branch | 6 |
+| `Main.java` | after `startup.run()`: `if (McpMain.needsGuiHook()) McpFrame.onGuiReady();` in a try/catch | 8 |
+
+Verified with real windows (build `674` sources, 45 tools unchanged):
+
+* `--with-gui` → server listening, exactly **one** "server started" entry (no double start when the
+auto-start setting is also on), and **"MCP window opened"** in the activity tail, i.e. the window was
+built without an exception.
+* Auto-start → plain `java ... logisim.Main` (no MCP flags at all, the way a user launches it) brings the
+server up on the configured port, live mode, one window; it stays quiet apart from one stderr line.
+* Read-only-at-start and paused-at-start settings reach the session (`read_only=true`, `paused=true`,
+`paused_by: "the user, from the Logisim window"`, reason `"paused at start by the settings"`); a mutating
+call is refused; `logisim_gui_status` still answers while paused; the agent cannot release a user pause
+("ask them to press resume"); each refusal is recorded in the activity log.
+* Headless regression: `-mcp --transport http` still serves 45 tools and never reaches the new GUI hook.
+
+*Still to verify by hand:* clicking the menu item itself (the same `showWindow()` path the `--with-gui`
+launch already exercised), Start/Stop round-tripping in the window, and two windows open with focus
+switching.
 
 **Phase 3 — polish.** `logisim_screenshot` and per-tool permissions; expose the current circuit/schematic as
 an MCP *resource* so an agent can "look" at it; optional "agent is here" overlay; an optional
@@ -171,10 +211,15 @@ an MCP *resource* so an agent can "look" at it; optional "agent is here" overlay
 1. **Agent opens a file** → a **new window** (never replaces the user's document).
 2. **The agent may not close windows or start a new empty project** (that would discard unsaved work); both
    are refused with an explanatory error unless the user enables them.
-3. **A hand-started GUI serves nothing until the user starts it** from the MCP window (the setting is
-   remembered). Until that window exists, `--transport http` on the command line is the way in.
+3. **A hand-started GUI serves nothing until the user starts it**, and the server is started from the MCP
+   window (Start), by the auto-start setting, or by `--with-gui`. Settings are remembered.
 4. **Read-only is off by default** — editing allowed, with Pause as the instant brake and every action
    undoable.
+5. **Everything MCP lives in one window** with sub-tabs, reached from one menu item; no Preferences tab, no
+   `AppPreferences` attributes, no new resource-bundle strings. The MCP layer owns its own settings.
+6. **A pause or read-only the user set is the user's alone.** The agent is told to ask them to release it,
+   which is why the pause carries a `paused_by` field: set from the window it is `the user`, otherwise the
+   agent may release it itself.
 5. **Highlighting replaces the selection** with the items the last call touched; it does not accumulate.
 6. **Heavy analysis may freeze the window.** The user accepts this: a complex circuit is expected to cost
    time, and the freeze is honest feedback rather than a hidden stall. No off-EDT analysis work is planned.
@@ -182,11 +227,6 @@ an MCP *resource* so an agent can "look" at it; optional "agent is here" overlay
    painful in practice, revisit.)*
 7. **Grouped undo** — deferred. Revisit if a burst of edits turns out to be awkward to undo one by one.
 
-**Transport** — agreed: HTTP only in GUI mode, with the reasoning in §3; headless keeps stdio.
-
-## 10. Testing
-
-* Headless mode must stay byte-for-byte identical in behaviour (existing smoke tests + the netlist checks).
 * Live-mode tests need a display: drive the GUI from a scripted MCP client, then assert through
   `logisim_gui_status` / `logisim_circuit_nets` that the model changed as expected, that the selection holds
   the expected components, and that a following `logisim_undo` restores the previous state.
