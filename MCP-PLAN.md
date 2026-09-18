@@ -19,7 +19,7 @@ by a workspace clean, which is why it now lives in the repository).*
 | Entry point | `com.cburch.logisim.Main -mcp` (also `--transport tcp --port N`, `--file f.circ`, `--help`) |
 | Code | `Logisim-Fork/com/cburch/logisim/mcp` (13 files) + `.../mcp/tools` (9 files) |
 | Existing code touched | `Main.main` (6-line dispatch), `gui/log/ComponentSelector.java` (one line, upstream's own later fix) |
-| Tools | **37** (see §3) |
+| Tools | **38** (see §3) |
 | Build | `Logisim-Fork/build-mcp.ps1` → `Logisim-Fork/build/classes`; see §7 |
 | Packaging | `build-mcp.ps1 -Jar -Exe -Single [-Console]` → jars and two kinds of Windows exe (§3.3) |
 | Editor setup | root `.classpath` + `.vscode/settings.json` describe the layout; JDT output is `Logisim-Fork/build/jdt` |
@@ -54,14 +54,14 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 
 ## 3. Implemented
 
-### 3.1 Tools (37)
+### 3.1 Tools (38)
 
 | Group | Tools |
 |---|---|
 | Session | `logisim_status` (server, file, current circuit, simulation, heap, `last_wire_repair`), `logisim_undo`, `logisim_circuit_info` |
 | Files | `logisim_file_new`, `logisim_file_open`, `logisim_file_recover`, `logisim_file_save`, `logisim_file_save_as`, `logisim_file_close`, `logisim_file_info` |
 | Discovery | `logisim_library_list`, `logisim_component_catalog` (libraries, types, attributes, option lists) |
-| Circuits | `logisim_circuit_list`, `logisim_circuit_describe` (components, ports, wires, `skewed_wire_count`, `broken` flags), `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_stats` |
+| Circuits | `logisim_circuit_list`, `logisim_circuit_describe` (components, ports, wires, `skewed_wire_count`, `broken` flags), `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_stats`, `logisim_circuit_nets` (nets: wires, ports, labels, drivers, unconnected ports, tunnel notes) |
 | Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add` (`points` / `paths` / `from`+`to`, auto-routing), `logisim_wire_remove` |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
@@ -112,7 +112,12 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
   analyses it identically (8-row full-adder truth table); files it writes open again; the ±2 experiment
   reproduced and self-healed (`last_wire_repair` with the same two corners, `skewed_wire_count: 0`).
 - **Not yet verified end-to-end: `logisim_file_recover`'s rewrite branch** — it needs a genuinely damaged
-  file. §6.1 says how to finish this.
+  file. The plan is for `logisim_self_test` (§5, P1.4) to build that fixture in the system temp folder, so the
+  check becomes part of the smoke test instead of depending on a hand-made damaged project.
+- **`logisim_circuit_nets` (P1.3) is implemented and verified** on 2.15.0.1: on a freshly wired XOR circuit it
+  reports 3 nets with `drivers: 1` each (an input pin counts as the driver, an output pin does not), flags a
+  stray pin under `unconnected_ports`, filters correctly by `net`/`port`, and a deliberate two-input-pin net
+  reports `drivers: 2` — which the simulator then confirms by reading `e`.
 
 ---
 
@@ -140,10 +145,9 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 
 ### P1 — next safe work (no decisions needed)
 
-3. **`logisim_circuit_nets`** — each net with its ports, labels and width, plus which component pin drives it.
-   The single most useful debugging addition: a missed port or two shorted nets become obvious instead of
-   being inferred from `x` / `e` values. (`CircuitWires.BundleMap` is package private, so this needs a small
-   bridge class in `com.cburch.logisim.circuit`.)
+3. **`logisim_circuit_nets`** — each net with its ports, labels and width, plus which port drives it.
+   **Implemented and verified** (see §3.5); it walks the circuit directly rather than reaching into Logisim's
+   package-private bundle map, so nothing was added inside an original package.
 4. **`logisim_self_test`** — one call that builds a known circuit, checks a truth table, exercises batched
    wiring and a save/load round trip, and returns pass/fail. The repo has no tests, so this doubles as a
    smoke test for every future change, including the packaging switches.

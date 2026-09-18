@@ -23,6 +23,7 @@ import com.cburch.logisim.mcp.tools.CircuitTools;
 import com.cburch.logisim.mcp.tools.DiagTools;
 import com.cburch.logisim.mcp.tools.EditTools;
 import com.cburch.logisim.mcp.tools.FileTools;
+import com.cburch.logisim.mcp.tools.NetTools;
 import com.cburch.logisim.mcp.tools.SessionTools;
 import com.cburch.logisim.mcp.tools.SimTools;
 
@@ -198,6 +199,7 @@ public final class McpMain {
 		registry.register(CircuitTools.setMain(session));
 		registry.register(CircuitTools.select(session));
 		registry.register(CircuitTools.statistics(session));
+		registry.register(NetTools.nets(session));
 
 		registry.register(EditTools.addComponent(session));
 		registry.register(EditTools.removeComponent(session));

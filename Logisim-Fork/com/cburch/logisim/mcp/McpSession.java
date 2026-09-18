@@ -1181,6 +1181,351 @@ public class McpSession implements Closeable {
 		return ret;
 	}
 
+	// ------------------------------------------------------------------
+	// nets
+	// ------------------------------------------------------------------
+
+	/** A component port, remembered with the index it has in its component. */
+	private static final class PortRef {
+		final Component component;
+		final EndData end;
+		final int index;
+
+		PortRef(Component component, EndData end, int index) {
+			this.component = component;
+			this.end = end;
+			this.index = index;
+		}
+	}
+
+	/** Everything gathered for one net while the circuit is being walked. */
+	private static final class NetBucket {
+		final List<Wire> wires = new ArrayList<Wire>();
+		final List<PortRef> ports = new ArrayList<PortRef>();
+		final java.util.TreeSet<String> labels = new java.util.TreeSet<String>();
+		final java.util.TreeSet<String> tunnels = new java.util.TreeSet<String>();
+		boolean sharedLocation;
+	}
+
+	/**
+	 * Groups the wires and the component ports of a circuit into nets: the sets of
+	 * things that are the same electrical node. An agent cannot see the screen, so this
+	 * is how it finds the two causes of a puzzling read: a port that lands nowhere
+	 * (which reads 'x', "undriven"), and a net with more than one driver (which reads
+	 * 'e', "conflicting drivers").
+	 *
+	 * <p>
+	 * The circuit is walked directly instead of asking Logisim for its own bundle map
+	 * (which is package private, so using it would mean adding classes inside
+	 * com.cburch.logisim.circuit). The rules are the ones the editor shows: a wire
+	 * conducts between its own two ends, a wire end that lands on another wire joins
+	 * that wire, and wires that merely cross do not join. Logisim has already split
+	 * wires where ports meet them and merged collinear overlaps by the time this runs,
+	 * so a port that touches a wire does so at a wire end or at a junction found here.
+	 * </p>
+	 *
+	 * @param netFilter
+	 *            report only this net, by the id a previous call returned, or null
+	 * @param portFilter
+	 *            report only the net this location belongs to, or null
+	 */
+	public JsonObject describeNets(Circuit circuit, String netFilter, Location portFilter, boolean includeUnconnected,
+			int limit) {
+		indexComponents(circuit);
+		List<Wire> wires = new ArrayList<Wire>(circuit.getWires());
+		Map<Location, Location> parent = new HashMap<Location, Location>();
+
+		for (Wire wire : wires) {
+			union(parent, wire.getEnd0(), wire.getEnd1());
+		}
+		for (Wire wire : wires) {
+			Location[] ends = { wire.getEnd0(), wire.getEnd1() };
+			for (Location end : ends) {
+				for (Wire other : wires) {
+					if (!other.equals(wire) && other.contains(end)) {
+						union(parent, end, other.getEnd0());
+					}
+				}
+			}
+		}
+
+		Map<Location, NetBucket> buckets = new LinkedHashMap<Location, NetBucket>();
+		for (Wire wire : wires) {
+			bucketFor(buckets, find(parent, wire.getEnd0())).wires.add(wire);
+		}
+
+		List<PortRef> unconnected = new ArrayList<PortRef>();
+		Map<Location, List<PortRef>> withoutWire = new LinkedHashMap<Location, List<PortRef>>();
+		for (Component comp : circuit.getNonWires()) {
+			int index = 0;
+			for (EndData end : comp.getEnds()) {
+				if (end == null) {
+					index++;
+					continue;
+				}
+				Location loc = end.getLocation();
+				Location root = parent.containsKey(loc) ? find(parent, loc) : null;
+				if (root == null) {
+					// a port can also sit inside a wire whose point set has not been
+					// split since it was placed; count that as a junction
+					for (Wire wire : wires) {
+						if (wire.contains(loc)) {
+							root = find(parent, wire.getEnd0());
+							break;
+						}
+					}
+				}
+				PortRef ref = new PortRef(comp, end, index);
+				if (root == null) {
+					List<PortRef> shareHere = withoutWire.get(loc);
+					if (shareHere == null) {
+						shareHere = new ArrayList<PortRef>();
+						withoutWire.put(loc, shareHere);
+					}
+					shareHere.add(ref);
+				} else {
+					addPort(bucketFor(buckets, root), ref);
+				}
+				index++;
+			}
+		}
+		// ports that share a location are one node to Logisim even without a wire, so
+		// they are reported as a net with no wires; a port that sits alone touches
+		// nothing at all and is what makes a read come back 'x'
+		for (Map.Entry<Location, List<PortRef>> entry : withoutWire.entrySet()) {
+			List<PortRef> shareHere = entry.getValue();
+			if (shareHere.size() == 1) {
+				unconnected.add(shareHere.get(0));
+			} else {
+				NetBucket bucket = bucketFor(buckets, entry.getKey());
+				for (PortRef ref : shareHere) {
+					addPort(bucket, ref);
+				}
+				bucket.sharedLocation = true;
+			}
+		}
+
+		// the nets worth reading first are the ones with the most connections
+		List<Map.Entry<Location, NetBucket>> ordered = new ArrayList<Map.Entry<Location, NetBucket>>(
+				buckets.entrySet());
+		java.util.Collections.sort(ordered, new java.util.Comparator<Map.Entry<Location, NetBucket>>() {
+			@Override
+			public int compare(Map.Entry<Location, NetBucket> a, Map.Entry<Location, NetBucket> b) {
+				int scoreA = a.getValue().ports.size() * 1000 + a.getValue().wires.size();
+				int scoreB = b.getValue().ports.size() * 1000 + b.getValue().wires.size();
+				if (scoreA != scoreB) {
+					return scoreB - scoreA;
+				}
+				return a.getKey().compareTo(b.getKey());
+			}
+		});
+
+		// tunnel labels that appear on more than one net: Logisim joins those nets by
+		// name, without any wire, which no net walk can see
+		Map<String, Integer> tunnelNets = new HashMap<String, Integer>();
+		for (Map.Entry<Location, NetBucket> entry : ordered) {
+			for (String label : entry.getValue().tunnels) {
+				Integer seen = tunnelNets.get(label);
+				tunnelNets.put(label, Integer.valueOf(seen == null ? 1 : seen.intValue() + 1));
+			}
+		}
+
+		JsonArray problems = new JsonArray();
+		JsonArray nets = new JsonArray();
+		int index = 0;
+		int shown = 0;
+		boolean truncated = false;
+		for (Map.Entry<Location, NetBucket> entry : ordered) {
+			index++;
+			String id = "n" + index;
+			NetBucket bucket = entry.getValue();
+			boolean selected = true;
+			if (netFilter != null) {
+				selected = netFilter.equalsIgnoreCase(id) || netFilter.equals(String.valueOf(index));
+			}
+			if (selected && portFilter != null) {
+				selected = false;
+				for (PortRef ref : bucket.ports) {
+					if (ref.end.getLocation().equals(portFilter)) {
+						selected = true;
+						break;
+					}
+				}
+			}
+			if (!selected) {
+				continue;
+			}
+			if (shown >= limit) {
+				truncated = true;
+				break;
+			}
+			shown++;
+
+			JsonObject net = new JsonObject();
+			net.addProperty("id", id);
+			int length = 0;
+			for (Wire wire : bucket.wires) {
+				length += wire.getLength();
+			}
+			net.addProperty("wire_count", bucket.wires.size());
+			net.addProperty("wire_length", length);
+			net.addProperty("port_count", bucket.ports.size());
+			if (bucket.labels.size() > 0) {
+				net.add("labels", toJsonArray(bucket.labels));
+			}
+			int drivers = 0;
+			int bidirectional = 0;
+			JsonArray pins = new JsonArray();
+			for (PortRef ref : bucket.ports) {
+				JsonObject port = describePort(ref.component, ref);
+				pins.add(port);
+				// What drives a net is the raw end type, not the direction an agent sees:
+				// Logisim stores an input pin as OUTPUT_ONLY because inside the circuit it
+				// is the source of the wire, while an output pin only reads it.
+				int endType = ref.end.getType();
+				if (endType == EndData.OUTPUT_ONLY) {
+					drivers++;
+				} else if (endType != EndData.INPUT_ONLY) {
+					bidirectional++;
+				}
+			}
+			net.addProperty("drivers", drivers);
+			if (bidirectional > 0) {
+				net.addProperty("bidirectional", bidirectional);
+			}
+			net.add("ports", pins);
+
+			// per net notes: the two things that make a read come back 'x' or 'e'
+			JsonArray notes = new JsonArray();
+			if (drivers > 1) {
+				notes.add("this net has " + drivers + " drivers, so it reads 'e' (conflicting drivers)");
+				problems.add("net " + id + " has " + drivers + " drivers, which reads as 'e'");
+			}
+			if (bucket.wires.isEmpty() && (bucket.ports.size() > 1 || bucket.sharedLocation)) {
+				notes.add("these ports share a location with no wire between them");
+			}
+			if (drivers == 0 && bidirectional == 0 && bucket.ports.size() > 0) {
+				notes.add("nothing drives this net, so it reads 'x' (undriven)");
+				problems.add("net " + id + " has no driver, so it reads as 'x'");
+			}
+			if (bidirectional > 0) {
+				notes.add(bidirectional + " port(s) here can drive as well when enabled (tristate or bus), so this "
+						+ "net reads 'x' while nothing is driving it");
+			}
+			for (String label : bucket.tunnels) {
+				Integer count = tunnelNets.get(label);
+				if (count != null && count.intValue() > 1) {
+					notes.add("tunnel '" + label + "' also appears on " + (count.intValue() - 1)
+							+ " other net(s); Logisim joins tunnels by name, with no wire needed");
+				}
+			}
+			if (notes.size() > 0) {
+				net.add("notes", notes);
+			}
+			nets.add(net);
+		}
+
+		JsonObject ret = new JsonObject();
+		ret.addProperty("circuit", circuit.getName());
+		ret.addProperty("wire_count", wires.size());
+		ret.addProperty("net_count", buckets.size());
+		ret.addProperty("nets_returned", nets.size());
+		if (truncated) {
+			ret.addProperty("truncated", Boolean.TRUE);
+		}
+		ret.add("nets", nets);
+		if (includeUnconnected && unconnected.size() > 0) {
+			JsonArray ports = new JsonArray();
+			for (PortRef ref : unconnected) {
+				ports.add(describePort(ref.component, ref));
+			}
+			ret.addProperty("unconnected_port_count", unconnected.size());
+			ret.add("unconnected_ports", ports);
+			problems.add(unconnected.size() + " port(s) touch no wire, so they read 'x'");
+		}
+		if (problems.size() > 0) {
+			ret.add("problems", problems);
+			ret.add("hint", Json.element("a net that reads 'x' has no driver, a net that reads 'e' has two; "
+					+ "connect the port to a wire (their positions are given above) or remove one of the drivers"));
+		}
+		return ret;
+	}
+
+	private static NetBucket bucketFor(Map<Location, NetBucket> buckets, Location root) {
+		NetBucket bucket = buckets.get(root);
+		if (bucket == null) {
+			bucket = new NetBucket();
+			buckets.put(root, bucket);
+		}
+		return bucket;
+	}
+
+	/** Adds a port to a net and remembers its label, and a tunnel's label. */
+	private static void addPort(NetBucket bucket, PortRef ref) {
+		bucket.ports.add(ref);
+		String label = ref.component.getAttributeSet().getValue(StdAttr.LABEL);
+		if (label != null && !label.isEmpty()) {
+			bucket.labels.add(label);
+			if ("Tunnel".equals(ref.component.getFactory().getName())) {
+				bucket.tunnels.add(label);
+			}
+		}
+	}
+
+	private static JsonArray toJsonArray(java.util.Collection<String> values) {
+		JsonArray ret = new JsonArray();
+		for (String value : values) {
+			ret.add(new com.google.gson.JsonPrimitive(value));
+		}
+		return ret;
+	}
+
+	/** One port, described the same way logisim_component_add describes its ports. */
+	private JsonObject describePort(Component comp, PortRef ref) {
+		JsonObject port = new JsonObject();
+		port.addProperty("component", idOf(comp));
+		port.addProperty("type", comp.getFactory().getName());
+		port.addProperty("port", ref.index);
+		List<String> pinLabels = subcircuitPinLabels(comp);
+		if (pinLabels != null && ref.index < pinLabels.size() && !pinLabels.get(ref.index).isEmpty()) {
+			port.addProperty("pin", pinLabels.get(ref.index));
+		}
+		String label = comp.getAttributeSet().getValue(StdAttr.LABEL);
+		if (label != null && !label.isEmpty()) {
+			port.addProperty("label", label);
+		}
+		port.addProperty("direction", portDirection(comp.getFactory(), ref.end));
+		port.addProperty("width", ref.end.getWidth().getWidth());
+		port.add("loc", point(ref.end.getLocation()));
+		return port;
+	}
+
+	/** Union-find over locations; a location that is not known yet becomes its own set. */
+	private static Location find(Map<Location, Location> parent, Location loc) {
+		Location root = parent.get(loc);
+		if (root == null) {
+			parent.put(loc, loc);
+			return loc;
+		}
+		while (!root.equals(loc)) {
+			loc = root;
+			root = parent.get(loc);
+			if (root == null) {
+				parent.put(loc, loc);
+				return loc;
+			}
+		}
+		return loc;
+	}
+
+	private static void union(Map<Location, Location> parent, Location a, Location b) {
+		Location rootA = find(parent, a);
+		Location rootB = find(parent, b);
+		if (!rootA.equals(rootB)) {
+			parent.put(rootB, rootA);
+		}
+	}
+
 	public JsonObject describePin(Instance pin) {
 		JsonObject ret = new JsonObject();
 		ret.addProperty("name", pinName(pin));

@@ -27,7 +27,7 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Session | `logisim_status`, `logisim_undo`, `logisim_circuit_info` |
 | Files | `logisim_file_new`, `logisim_file_open`, `logisim_file_recover`, `logisim_file_save`, `logisim_file_save_as`, `logisim_file_close`, `logisim_file_info` |
 | Discovery | `logisim_library_list`, `logisim_component_catalog` |
-| Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats` |
+| Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats`, `logisim_circuit_nets` |
 | Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
@@ -37,6 +37,31 @@ Every tool returns JSON. Errors come back as `isError: true` with a message that
 says what to do next (for example *"a Pin has no attribute 'nonsense'; its
 attributes are: facing, output, width, ..."*), because an agent has to be able to
 recover on its own.
+
+### Seeing the wiring through the netlist
+
+An agent cannot look at the schematic, so wiring mistakes used to surface only as an
+`x` or an `e` in a read. `logisim_circuit_nets` closes that gap: it groups the wires
+and the component ports of a circuit into nets (the sets of things that are the same
+electrical node) and reports each net's wires, length, labels, ports, and **how many
+of those ports drive it**. The two symptoms then read as follows:
+
+* a net that reads `x` has **no driver** — or has a port listed under
+  `unconnected_ports`, which means that port touches no wire at all;
+* a net that reads `e` has **more than one driver**, and the port list names them.
+
+Drivers are counted by what a component does electrically, not by the direction shown
+in `ports`: inside a circuit an *input* pin is the source of its net, and an *output*
+pin only reads it. Ports that can drive when enabled (tristate pins, bus ports) are
+counted separately as `bidirectional`, which is also why an unpoked tristate pin reads
+`x` rather than a value. Verified against the simulator: two input pins wired to one
+net report `drivers: 2` and both read `e` once they are driven to opposite values.
+
+Nets are numbered from the most connected down, so `n1` is usually the busiest node.
+Pass `net` (`"n3"` or `"3"`) or `port` (`"S"`, `"c3"`, `"c3.1"`) to look at one node
+only, `include_unconnected` to silence the dangling list, and `limit` to cap the
+response on a large circuit. Tunnels are reported too: they join nets by *name* with
+no wire, so a tunnel label that appears on more than one net is called out in a note.
 
 The server also advertises the rules that keep a circuit and its file usable - never
 draw a wire whose ends differ in both coordinates, keep coordinates on the 10 pixel
