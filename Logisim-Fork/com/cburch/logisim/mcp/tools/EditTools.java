@@ -23,6 +23,7 @@ import com.cburch.logisim.data.Location;
 import com.cburch.logisim.instance.StdAttr;
 import com.cburch.logisim.mcp.Json;
 import com.cburch.logisim.mcp.McpException;
+import com.cburch.logisim.mcp.McpInstructions;
 import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
@@ -46,16 +47,7 @@ public final class EditTools {
 	}
 
 	public static McpTool addComponent(final McpSession session) {
-		return new AbstractTool("logisim_component_add",
-				"Places one component (gate, pin, flip-flop, multiplexer, memory, subcircuit, ...) at a position in "
-						+ "a circuit. Returns the new component's session id, its ports and their positions. "
-						+ "Components are not connected by placement: add wires with logisim_wire_add so that a wire "
-						+ "endpoint lands exactly on a port position. Use 'label' to name pins and signals, "
-						+ "'facing' to orient the component, and 'width' for bus width. A new Pin is tristate, so an "
-						+ "undriven input reads as x until you set it; pass attributes {\"tristate\": false} if an "
-						+ "undriven input should read 0 instead. IMPORTANT: keep x and y multiples of 10. A port placed "
-						+ "within 2 units of an existing wire makes Logisim split that wire into a diagonal wire, which "
-						+ "makes every further edit and every later load of the file hang until the Java heap is exhausted.",
+		return new AbstractTool("logisim_component_add", McpInstructions.COMPONENT_ADD,
 				Schemas.object()
 						.opt("lib", Schemas.string("Library name, for example 'Wiring', 'Gates', 'Memory', 'I/O' or "
 								+ "'Circuits'; omit when the type name is unambiguous"))
@@ -101,6 +93,7 @@ public final class EditTools {
 
 				Location loc = Location.create(ctx.requireInt("x"), ctx.requireInt("y"));
 				Component component = factory.createComponent(loc, attrs);
+				requireOnCanvas(component, "the position of the new " + factory.getName());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				mutation.add(component);
 				session.commit(mutation, "add " + factory.getName());
@@ -145,9 +138,7 @@ public final class EditTools {
 	}
 
 	public static McpTool removeComponent(final McpSession session) {
-		return new AbstractTool("logisim_component_remove",
-				"Removes a component or a single wire from a circuit. Attached wires are left in place, so they may "
-						+ "end up dangling; remove them separately with logisim_wire_remove if that is not wanted.",
+		return new AbstractTool("logisim_component_remove", McpInstructions.COMPONENT_REMOVE,
 				Schemas.object()
 						.req("component", Schemas.componentRef("The component or wire to remove."))
 						.opt("circuit", Schemas.string("Circuit to modify; defaults to the current circuit"))) {
@@ -172,12 +163,7 @@ public final class EditTools {
 	}
 
 	public static McpTool moveComponent(final McpSession session) {
-		return new AbstractTool("logisim_component_move",
-				"Moves a component to a new position, given either absolute 'x'/'y' or a relative 'dx'/'dy'. "
-						+ "Logisim does not drag wires along, so any wire that ended on the component's old port "
-						+ "positions will be left behind: the result reports how many, and you should re-add those "
-						+ "connections with logisim_wire_add. Consider removing and re-adding a component instead if "
-						+ "it is already wired.",
+		return new AbstractTool("logisim_component_move", McpInstructions.COMPONENT_MOVE,
 				Schemas.object()
 						.req("component", Schemas.componentRef("The component to move."))
 						.opt("x", Schemas.integer("New absolute X coordinate"))
@@ -205,6 +191,7 @@ public final class EditTools {
 				int attachedBefore = countAttachedWires(circuit, component);
 				AttributeSet attrs = (AttributeSet) component.getAttributeSet().clone();
 				Component replacement = component.getFactory().createComponent(Location.create(x, y), attrs);
+				requireOnCanvas(replacement, "the new position of this " + component.getFactory().getName());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				mutation.replace(component, replacement);
 				session.commit(mutation, "move " + component.getFactory().getName());
@@ -245,11 +232,7 @@ public final class EditTools {
 	}
 
 	public static McpTool setAttributes(final McpSession session) {
-		return new AbstractTool("logisim_component_set_attributes",
-				"Changes one or more attributes of an existing component, for example renaming a pin (label), "
-						+ "switching a pin between input and output (output = true/false), widening a bus (width), or "
-						+ "changing a memory's address size. Attribute names and legal values are listed by "
-						+ "logisim_component_catalog.",
+		return new AbstractTool("logisim_component_set_attributes", McpInstructions.COMPONENT_SET_ATTRIBUTES,
 				Schemas.object()
 						.req("component", Schemas.componentRef("The component to modify."))
 						.req("attributes", Schemas.freeObject("Attributes to set, by name, e.g. {\"width\": 8}"))
@@ -288,20 +271,7 @@ public final class EditTools {
 	}
 
 	public static McpTool addWire(final McpSession session) {
-		return new AbstractTool("logisim_wire_add",
-				"Draws wires, which are what actually connect component ports. Give a list of points in 'points'; "
-						+ "consecutive points must share either the x or the y coordinate, and a diagonal step between "
-						+ "two points is replaced by a right angled route automatically (choosing whichever corner does "
-						+ "not run through another component's port). Alternatively give just 'from' and 'to' for a single "
-						+ "connection, or 'paths' to draw many connections in one undoable edit. A wire endpoint must "
-						+ "coincide exactly with a port position (see the "
-						+ "'ports' entries of logisim_component_add / logisim_circuit_describe) for the connection to "
-						+ "count; use symbolic endpoints such as \"A\" or \"FA0.Cout\" to avoid coordinate arithmetic. "
-						+ "Logisim splits wires automatically where a third wire meets them. IMPORTANT: never try to "
-						+ "produce a wire whose ends differ in both x and y - Logisim cannot iterate such a wire and the "
-						+ "whole session then hangs until the Java heap is exhausted. Let this tool route, keep coordinates "
-						+ "on the 10 pixel grid, and give an explicit steering point rather than forcing an alignment that "
-						+ "the router refuses.",
+		return new AbstractTool("logisim_wire_add", McpInstructions.WIRE_ADD,
 				Schemas.object()
 						.opt("points", Schemas.array(Schemas.any("a point: [x, y], or a name such as \"A\" (pin or "
 								+ "component label), \"c3\" (component id) or \"c3.1\" (component id and port index) - "
@@ -403,8 +373,8 @@ public final class EditTools {
 			throw new McpException("give 'points' (a list of points), 'paths' (a list of such lists), or both "
 					+ "'from' and 'to'");
 		}
-		ret.add(ctx.session().resolvePoint(circuit, ctx.optElement("from")));
-		ret.add(ctx.session().resolvePoint(circuit, ctx.optElement("to")));
+		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("from"), "'from'"));
+		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("to"), "'to'"));
 		if (ret.size() < 2) {
 			throw new McpException("a wire needs at least two points");
 		}
@@ -417,12 +387,59 @@ public final class EditTools {
 		}
 		List<Location> ret = new ArrayList<Location>();
 		for (JsonElement element : points) {
-			ret.add(session.resolvePoint(circuit, element));
+			ret.add(readPoint(session, circuit, element, what + " entry"));
 		}
 		if (ret.size() < 2) {
 			throw new McpException(what + " needs at least two points");
 		}
 		return ret;
+	}
+
+	/**
+	 * Resolves one wire point, refusing a negative coordinate the agent wrote itself.
+	 *
+	 * <p>
+	 * A symbolic endpoint ("A", "FA0.Cout") is exempt: it names a port that already
+	 * exists, and refusing to wire to it because the user's own circuit happens to sit
+	 * partly off the canvas would be wrong. The rule is about the agent's own arithmetic,
+	 * which is what lands work out of sight.
+	 * </p>
+	 */
+	private static Location readPoint(McpSession session, Circuit circuit, JsonElement element, String what) {
+		Location loc = session.resolvePoint(circuit, element);
+		if (isCoordinateLiteral(element) && (loc.getX() < 0 || loc.getY() < 0)) {
+			throw new McpException(McpInstructions.negativeCoordinate(what, loc.getX(), loc.getY()));
+		}
+		return loc;
+	}
+
+	/** True when the agent gave numbers rather than the name of an existing port. */
+	private static boolean isCoordinateLiteral(JsonElement element) {
+		if (element == null || element.isJsonNull()) {
+			return false;
+		}
+		if (element.isJsonArray() || element.isJsonObject()) {
+			return true;
+		}
+		return element.isJsonPrimitive() && McpSession.tryParseLocation(element.getAsString()) != null;
+	}
+
+	/**
+	 * Refuses a component whose position, or any part of its body, would be at a negative
+	 * coordinate - off the canvas the user is looking at.
+	 */
+	private static void requireOnCanvas(Component component, String what) {
+		Location loc = component.getLocation();
+		if (loc.getX() < 0 || loc.getY() < 0) {
+			throw new McpException(McpInstructions.negativeCoordinate(what, loc.getX(), loc.getY()));
+		}
+		com.cburch.logisim.data.Bounds bounds = component.getBounds();
+		if (bounds.getX() < 0 || bounds.getY() < 0) {
+			throw new McpException(McpInstructions.negativeCoordinate(what, bounds.getX(), bounds.getY(),
+					"This component is " + bounds.getWidth() + " by " + bounds.getHeight()
+							+ " and is anchored at its centre, so give x = " + (loc.getX() - bounds.getX())
+							+ " and y = " + (loc.getY() - bounds.getY()) + " instead."));
+		}
 	}
 
 	/**
@@ -588,9 +605,7 @@ public final class EditTools {
 	}
 
 	public static McpTool removeWire(final McpSession session) {
-		return new AbstractTool("logisim_wire_remove",
-				"Removes one wire segment, either by its id (as reported by logisim_circuit_describe) or by giving "
-						+ "its exact 'from' and 'to' points.",
+		return new AbstractTool("logisim_wire_remove", McpInstructions.WIRE_REMOVE,
 				Schemas.object()
 						.opt("wire", Schemas.componentRef("The wire to remove."))
 						.opt("from", Schemas.any("Start point of the segment, used with 'to'"))

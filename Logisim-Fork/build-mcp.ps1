@@ -98,7 +98,7 @@ try {
         # resources/logisim/... resolves. Use it with the jars from libs/ on the
         # classpath; the fat jar below is the one that runs on its own.
         $thin = Join-Path $dist "Logisim.jar"
-        & $jartool cf $thin -C $out . -C resources .
+        & $jartool cf $thin -C $out . -C resources . -C doc .
         if ($LASTEXITCODE -ne 0) { throw "jar failed for $thin" }
         Write-Host ("ok: {0} ({1:N1} MB)" -f $thin, ((Get-Item $thin).Length / 1MB))
 
@@ -109,6 +109,10 @@ try {
         New-Item -ItemType Directory -Force -Path (Join-Path $stage "resources") | Out-Null
         Copy-Item -Recurse -Force "$out\*" $stage
         Copy-Item -Recurse -Force "resources\*" (Join-Path $stage "resources")
+        # The manual, all languages (about 4.5 MB). Both the GUI's Help menu and the MCP
+        # logisim_help tool read doc/... through the classpath, so a jar without it has
+        # no documentation at all - which is exactly what the packaged exe used to be.
+        Copy-Item -Recurse -Force "doc" (Join-Path $stage "doc")
         foreach ($lib in Get-ChildItem libs\*.jar) {
             Push-Location $stage
             & $jartool xf $lib.FullName

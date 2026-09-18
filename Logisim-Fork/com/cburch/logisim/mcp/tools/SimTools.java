@@ -25,6 +25,7 @@ import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
 import com.cburch.logisim.mcp.Values;
+import com.cburch.logisim.mcp.McpInstructions;
 import com.cburch.logisim.std.wiring.Pin;
 
 import com.google.gson.JsonArray;
@@ -48,10 +49,7 @@ public final class SimTools {
 	}
 
 	public static McpTool reset(final McpSession session) {
-		return new AbstractTool("logisim_sim_reset",
-				"Resets the simulation of a circuit: all stored signal values, flip-flop and memory contents are "
-						+ "thrown away and the circuit starts from its initial (undefined) state. The circuit's "
-						+ "components and wires are not touched.",
+		return new AbstractTool("logisim_sim_reset", McpInstructions.SIM_RESET,
 				Schemas.object().opt("circuit", Schemas.string("Circuit to reset; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -64,11 +62,7 @@ public final class SimTools {
 	}
 
 	public static McpTool setInput(final McpSession session) {
-		return new AbstractTool("logisim_sim_set_input",
-				"Drives one input pin to a value and propagates the circuit, so combinational logic settles "
-						+ "immediately. Values may be 0, 1, x (unknown), e (error/conflict), z (high impedance), or an "
-						+ "integer for a multi-bit pin (decimal, 0x hex, 0b binary). Identify the pin by its label or "
-						+ "by its location \"x,y\".",
+		return new AbstractTool("logisim_sim_set_input", McpInstructions.SIM_SET_INPUT,
 				Schemas.object()
 						.req("name", Schemas.string("Label of the input pin, or its location as \"x,y\""))
 						.req("value", Schemas.string("Value to drive, e.g. \"1\", \"0\", \"8\" or \"0x3f\""))
@@ -99,9 +93,7 @@ public final class SimTools {
 	}
 
 	public static McpTool setInputs(final McpSession session) {
-		return new AbstractTool("logisim_sim_set_inputs",
-				"Drives several input pins at once and propagates the circuit once at the end, which is the fast and "
-						+ "deterministic way to apply a test vector before reading the outputs.",
+		return new AbstractTool("logisim_sim_set_inputs", McpInstructions.SIM_SET_INPUTS,
 				Schemas.object()
 						.req("values", Schemas.freeObject("Pin label to value, e.g. {\"A\":\"1\",\"B\":\"0\"}"))
 						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
@@ -132,10 +124,7 @@ public final class SimTools {
 	}
 
 	public static McpTool read(final McpSession session) {
-		return new AbstractTool("logisim_sim_read",
-				"Reads the current value of named signals (pin labels) or of specific locations, without changing "
-						+ "anything. Values are those from the most recent propagation; call logisim_sim_propagate or "
-						+ "logisim_sim_set_input first if the circuit has just been edited.",
+		return new AbstractTool("logisim_sim_read", McpInstructions.SIM_READ,
 				Schemas.object()
 						.opt("names", Schemas.array(Schemas.string("pin label or location"),
 								"Pin labels, or locations written as \"x,y\""))
@@ -183,10 +172,7 @@ public final class SimTools {
 	}
 
 	public static McpTool readAll(final McpSession session) {
-		return new AbstractTool("logisim_sim_read_all",
-				"Reads every pin of a circuit at once and returns the values both as a simple name-to-value map and "
-						+ "as a detailed list including each pin's direction, width, position and the value the pin "
-						+ "itself is driving. This is the quickest way to see the result of a test vector.",
+		return new AbstractTool("logisim_sim_read_all", McpInstructions.SIM_READ_ALL,
 				Schemas.object().opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -214,10 +200,7 @@ public final class SimTools {
 	}
 
 	public static McpTool propagate(final McpSession session) {
-		return new AbstractTool("logisim_sim_propagate",
-				"Settles all combinational logic and returns the resulting pin values. Clocked components do not "
-						+ "advance: use logisim_sim_tick for that. If the circuit never settles, 'oscillating' comes "
-						+ "back true, which usually means a combinational feedback loop.",
+		return new AbstractTool("logisim_sim_propagate", McpInstructions.SIM_PROPAGATE,
 				Schemas.object().opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -237,10 +220,7 @@ public final class SimTools {
 	}
 
 	public static McpTool tick(final McpSession session) {
-		return new AbstractTool("logisim_sim_tick",
-				"Advances the simulation by whole clock cycles: each cycle fires one edge on every Clock component "
-						+ "and then settles the logic, which is how sequential circuits (flip-flops, counters, "
-						+ "registers, control units) make progress. Returns the pin values after the last cycle.",
+		return new AbstractTool("logisim_sim_tick", McpInstructions.SIM_TICK,
 				Schemas.object()
 						.opt("count", Schemas.integer("Number of clock cycles to advance (default 1)"))
 						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
@@ -285,9 +265,7 @@ public final class SimTools {
 	}
 
 	public static McpTool status(final McpSession session) {
-		return new AbstractTool("logisim_sim_status",
-				"Reports how the simulation of a circuit currently stands: how many clock cycles have elapsed, "
-						+ "whether the circuit is oscillating (never settling), and the current pin values.",
+		return new AbstractTool("logisim_sim_status", McpInstructions.SIM_STATUS,
 				Schemas.object().opt("circuit", Schemas.string("Circuit to inspect; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -354,3 +332,4 @@ public final class SimTools {
 		return ret;
 	}
 }
+

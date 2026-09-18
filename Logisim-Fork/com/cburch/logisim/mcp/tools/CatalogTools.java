@@ -21,6 +21,7 @@ import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
 import com.cburch.logisim.mcp.McpSession.CatalogEntry;
+import com.cburch.logisim.mcp.McpInstructions;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -32,9 +33,7 @@ public final class CatalogTools {
 	}
 
 	public static McpTool libraryList(final McpSession session) {
-		return new AbstractTool("logisim_library_list",
-				"Lists the component libraries available in the current project, with the number of components in "
-						+ "each. Subcircuits of the project itself appear under the pseudo library 'Circuits'.",
+		return new AbstractTool("logisim_library_list", McpInstructions.LIBRARY_LIST,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -61,13 +60,7 @@ public final class CatalogTools {
 	}
 
 	public static McpTool componentCatalog(final McpSession session) {
-		return new AbstractTool("logisim_component_catalog",
-				"Lists the components that can be placed in a circuit, optionally filtered by library and by a "
-						+ "name substring, together with each component's attributes (name, type, default, and the "
-						+ "legal values where Logisim can report them) and port count. Call this before "
-						+ "logisim_component_add so that attribute names and values are correct; for example a Pin has "
-						+ "a boolean attribute 'output' (true makes it an output pin) and a 'facing' attribute with "
-						+ "values north/east/south/west.",
+		return new AbstractTool("logisim_component_catalog", McpInstructions.COMPONENT_CATALOG,
 				Schemas.object()
 						.opt("lib", Schemas.string("Restrict to one library, for example 'Wiring', 'Memory', "
 								+ "'Gates' or 'Circuits'"))
@@ -100,6 +93,7 @@ public final class CatalogTools {
 					matches.add(entry);
 				}
 				boolean withAttributes = verbose || matches.size() <= 8;
+				boolean withPorts = verbose || matches.size() <= 8;
 
 				JsonArray components = new JsonArray();
 				int emitted = 0;
@@ -120,6 +114,12 @@ public final class CatalogTools {
 						item.add("pins", pins);
 					} else {
 						item.addProperty("port_count", portCount(entry.factory));
+						if (withPorts) {
+							JsonArray ports = describeFactoryPorts(entry.factory);
+							if (ports != null) {
+								item.add("ports", ports);
+							}
+						}
 					}
 					if (withAttributes) {
 						AttributeSet defaults = null;
@@ -146,18 +146,85 @@ public final class CatalogTools {
 				ret.addProperty("match_count", matches.size());
 				ret.addProperty("returned", components.size());
 				ret.addProperty("attributes_included", Boolean.valueOf(withAttributes));
+				ret.addProperty("ports_included", Boolean.valueOf(withPorts));
 				ret.add("components", components);
 				return ret;
 			}
 		};
 	}
 
-	/** Number of fixed ports, for factories that declare them statically. */
+	/** Number of ports, for factories whose components have them. */
 	static Integer portCount(com.cburch.logisim.comp.ComponentFactory factory) {
-		if (factory instanceof com.cburch.logisim.instance.InstanceFactory) {
-			return Integer.valueOf(((com.cburch.logisim.instance.InstanceFactory) factory).getPorts().size());
+		java.util.List<com.cburch.logisim.instance.Port> ports = factoryPorts(factory);
+		return ports == null ? null : Integer.valueOf(ports.size());
+	}
+
+	/**
+	 * The ports of a component of this type, built from a throwaway instance so that the
+	 * library computes them the same way it does for a component on the canvas: many
+	 * components (a flip-flop, a counter, a RAM) work out their ports from their
+	 * attributes, and their factory on its own has none to report.
+	 */
+	private static java.util.List<com.cburch.logisim.instance.Port> factoryPorts(
+			com.cburch.logisim.comp.ComponentFactory factory) {
+		if (!(factory instanceof com.cburch.logisim.instance.InstanceFactory)) {
+			return null;
 		}
-		return null;
+		try {
+			AttributeSet defaults = factory.createAttributeSet();
+			com.cburch.logisim.comp.Component probe = factory.createComponent(
+					com.cburch.logisim.data.Location.create(0, 0), defaults);
+			return com.cburch.logisim.instance.Instance.getInstanceFor(probe).getPorts();
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	/**
+	 * The ports a component of this type has, with the library's own name for each one.
+	 *
+	 * <p>
+	 * This is the answer to "what does each pin do": a name such as "clock", "clear" or
+	 * "carry out", the direction the value travels, the width, and where the port sits
+	 * relative to the component's anchor. The ports come from the component the library
+	 * would build with its default attributes, so a component whose shape depends on its
+	 * attributes is described in that default shape - the component a tool actually places
+	 * reports its own ports, with the same names.
+	 * </p>
+	 */
+	static JsonArray describeFactoryPorts(com.cburch.logisim.comp.ComponentFactory factory) {
+		java.util.List<com.cburch.logisim.instance.Port> ports = factoryPorts(factory);
+		if (ports == null) {
+			return null;
+		}
+		AttributeSet defaults;
+		try {
+			defaults = factory.createAttributeSet();
+		} catch (Throwable t) {
+			return null;
+		}
+		JsonArray ret = new JsonArray();
+		int index = 0;
+		for (com.cburch.logisim.instance.Port port : ports) {
+			JsonObject item = new JsonObject();
+			item.addProperty("index", Integer.valueOf(index++));
+			String name = port.getToolTip();
+			if (name != null && !name.isEmpty()) {
+				item.addProperty("name", name);
+			}
+			try {
+				com.cburch.logisim.comp.EndData end = port.toEnd(com.cburch.logisim.data.Location.create(0, 0),
+						defaults);
+				item.add("at", Json.array(Integer.valueOf(end.getLocation().getX()),
+						Integer.valueOf(end.getLocation().getY())));
+				item.addProperty("width", Integer.valueOf(end.getWidth().getWidth()));
+				item.addProperty("direction", McpSession.endType(end.getType()));
+			} catch (Throwable t) {
+				// a port whose width comes from an attribute that cannot be resolved here
+			}
+			ret.add(item);
+		}
+		return ret;
 	}
 
 	/** Helper used by the edit tools to produce an actionable error message. */
@@ -182,3 +249,4 @@ public final class CatalogTools {
 		return ret;
 	}
 }
+

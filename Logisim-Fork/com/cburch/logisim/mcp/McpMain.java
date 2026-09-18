@@ -21,6 +21,7 @@ import com.cburch.logisim.mcp.tools.AnalyzeTools;
 import com.cburch.logisim.mcp.tools.CatalogTools;
 import com.cburch.logisim.mcp.tools.CircuitTools;
 import com.cburch.logisim.mcp.tools.DiagTools;
+import com.cburch.logisim.mcp.tools.DocTools;
 import com.cburch.logisim.mcp.tools.EditTools;
 import com.cburch.logisim.mcp.tools.FileTools;
 import com.cburch.logisim.mcp.tools.GuiTools;
@@ -454,6 +455,8 @@ public final class McpMain {
 
 		registry.register(CatalogTools.libraryList(session));
 		registry.register(CatalogTools.componentCatalog(session));
+		// not tied to a session: the manual can be read before anything is opened
+		registry.register(DocTools.help());
 
 		registry.register(CircuitTools.list(session));
 		registry.register(CircuitTools.describe(session));

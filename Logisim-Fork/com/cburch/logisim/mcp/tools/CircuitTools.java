@@ -18,6 +18,7 @@ import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -29,9 +30,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool list(final McpSession session) {
-		return new AbstractTool("logisim_circuit_list",
-				"Lists every circuit in the project with its size. A Logisim project is a set of circuits; one of "
-						+ "them is the main circuit, and the others can be placed as components inside each other.",
+		return new AbstractTool("logisim_circuit_list", McpInstructions.CIRCUIT_LIST,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -58,11 +57,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool describe(final McpSession session) {
-		return new AbstractTool("logisim_circuit_describe",
-				"Returns the full contents of one circuit: every component with its session id, type, position, "
-						+ "attributes and ports, every wire with its endpoints, and the circuit's pins. This is the "
-						+ "main way to inspect what has been built so far. Wires are the only things that connect "
-						+ "components: a wire endpoint must land exactly on a port position.",
+		return new AbstractTool("logisim_circuit_describe", McpInstructions.CIRCUIT_DESCRIBE,
 				Schemas.object()
 						.opt("circuit", Schemas.string("Circuit name; defaults to the current circuit"))
 						.opt("include_wires", Schemas.bool("Include the wire list (default true)"))
@@ -78,10 +73,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool create(final McpSession session) {
-		return new AbstractTool("logisim_circuit_create",
-				"Creates a new empty circuit (a subcircuit sheet). It can then be placed inside other circuits as a "
-						+ "component: add one with logisim_component_add using lib='Circuits' and type=<circuit name>. "
-						+ "Its pins become the subcircuit's ports.",
+		return new AbstractTool("logisim_circuit_create", McpInstructions.CIRCUIT_CREATE,
 				Schemas.object().req("name", Schemas.string("Name of the new circuit, must not already exist"))
 						.opt("set_current", Schemas.bool("Make the new circuit current (default true)"))) {
 			@Override
@@ -110,9 +102,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool remove(final McpSession session) {
-		return new AbstractTool("logisim_circuit_delete",
-				"Deletes a circuit from the project. Refuses to delete the main circuit or any circuit that is "
-						+ "still used as a subcircuit somewhere, so that a project can never be left inconsistent.",
+		return new AbstractTool("logisim_circuit_delete", McpInstructions.CIRCUIT_DELETE,
 				Schemas.object().req("name", Schemas.string("Name of the circuit to delete"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -146,9 +136,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool setMain(final McpSession session) {
-		return new AbstractTool("logisim_circuit_set_main",
-				"Designates which circuit is the project's main circuit. The main circuit is the one Logisim "
-						+ "simulates and shows when the file is opened.",
+		return new AbstractTool("logisim_circuit_set_main", McpInstructions.CIRCUIT_SET_MAIN,
 				Schemas.object().req("name", Schemas.string("Name of the circuit to make main"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -161,9 +149,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool select(final McpSession session) {
-		return new AbstractTool("logisim_circuit_select",
-				"Switches which circuit subsequent tools act on and which circuit's simulation state is used. "
-						+ "Just an editing convenience: it changes nothing in the project itself.",
+		return new AbstractTool("logisim_circuit_select", McpInstructions.CIRCUIT_SELECT,
 				Schemas.object().req("name", Schemas.string("Name of the circuit to work on"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -177,9 +163,7 @@ public final class CircuitTools {
 	}
 
 	public static McpTool statistics(final McpSession session) {
-		return new AbstractTool("logisim_circuit_stats",
-				"Counts how many components of each type a circuit uses, including those pulled in through "
-						+ "subcircuits. Useful to check that a generated design uses the components you intended.",
+		return new AbstractTool("logisim_circuit_stats", McpInstructions.CIRCUIT_STATS,
 				Schemas.object().opt("circuit", Schemas.string("Circuit name; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -211,3 +195,4 @@ public final class CircuitTools {
 		};
 	}
 }
+

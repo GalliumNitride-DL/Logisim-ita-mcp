@@ -13,6 +13,7 @@ import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -26,18 +27,7 @@ public final class DiagTools {
 	}
 
 	public static McpTool repairWires(final McpSession session) {
-		return new AbstractTool("logisim_circuit_repair_wires",
-				"Repairs wires whose two ends differ in both x and y. Logisim should never contain such a wire, but "
-						+ "its own wire repair can create one, and it cannot iterate one: WireIterator walks from end to "
-						+ "end diagonally and only stops when it lands exactly on the far end, which never happens, so "
-						+ "iteration never terminates. Since every edit makes Logisim walk every point of every wire "
-						+ "(and so does opening a file), a single such wire makes the next edit, and every later load "
-						+ "of the saved file, spin until the Java heap is exhausted - 'Java heap space' after a long "
-						+ "pause is the classic symptom. This tool replaces each such wire with two axis aligned "
-						+ "segments through a corner, keeping both ends connected. It is safe to run on a damaged "
-						+ "circuit because the broken wire is removed before Logisim repairs the circuit's wires, so it "
-						+ "is never walked. Every edit and every save already repairs such wires automatically, so this "
-						+ "tool is normally only needed to inspect a circuit or to force a repair.",
+		return new AbstractTool("logisim_circuit_repair_wires", McpInstructions.CIRCUIT_REPAIR_WIRES,
 				Schemas.object()
 						.opt("circuit", Schemas.string("Circuit to repair; defaults to the current circuit"))
 						.opt("dry_run", Schemas.bool("Only report what would be repaired (default false)"))) {
@@ -57,3 +47,4 @@ public final class DiagTools {
 		};
 	}
 }
+

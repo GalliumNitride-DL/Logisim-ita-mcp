@@ -31,60 +31,8 @@ public class McpServer {
 	/** Protocol revisions understood by this server, newest first. */
 	private static final String[] SUPPORTED_PROTOCOLS = { "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07" };
 
-	private static final String INSTRUCTIONS = "Controls the Logisim digital circuit simulator. "
-			+ "Circuits are edited in memory: nothing is written to disk unless logisim_file_save or "
-			+ "logisim_file_save_as is called. Typical workflow: logisim_file_new or logisim_file_open, "
-			+ "logisim_component_catalog to learn the available components, logisim_component_add and "
-			+ "logisim_wire_add to build, logisim_sim_set_input / logisim_sim_set_inputs plus logisim_sim_read / "
-			+ "logisim_sim_read_all to test, logisim_analyze_truth_table for exhaustive verification, then "
-			+ "logisim_file_save. Coordinates are integers.\n"
-			+ "\n"
-			+ "READ THIS FIRST - ignoring these rules can make a circuit, a whole session and the saved file "
-			+ "unusable, with a minutes long hang ending in 'OutOfMemoryError: Java heap space':\n"
-			+ "1. NEVER create a wire whose two ends differ in BOTH x and y (a diagonal wire). Logisim cannot "
-			+ "iterate such a wire, so every later edit - and every attempt to load the saved file - spins until "
-			+ "the Java heap is exhausted. Let logisim_wire_add do the routing: give it symbolic endpoints "
-			+ "(\"A\", \"c3\", \"c3.1\", \"FA0.Cout\") or a 'from'/'to' pair, and it inserts a right angled corner; "
-			+ "if a pair of points is diagonal, it routes or refuses - it never emits a diagonal. If it refuses, "
-			+ "pass an explicit 'points' list with a steering point instead of forcing coordinates through.\n"
-			+ "2. Keep every coordinate a multiple of 10, for components and for wire points. Logisim itself "
-			+ "corrupts wires whose geometry is off this grid: it accepts a point up to 2 units off a wire's line "
-			+ "and then splits the wire there, producing the diagonal wire of rule 1. A component port that lands "
-			+ "a few units off an existing wire is enough to trigger it.\n"
-			+ "3. Prefer ONE batched edit over many small ones: logisim_wire_add's 'paths' draws many wires as a "
-			+ "single undoable edit, and Logisim repairs the whole circuit's wiring on every edit, so n calls cost "
-			+ "n repairs and real time. Do not fire edits in parallel; they are serialised by per circuit locks.\n"
-			+ "4. Watch for the symptom and act on it: if any tool replies 'contains N wire(s) whose ends are not "
-			+ "axis aligned', call logisim_circuit_repair_wires for that circuit (it is safe in memory); if a file "
-			+ "on disk has that problem, logisim_file_open refuses to hang on it - use logisim_file_recover, then "
-			+ "logisim_file_save_as to write the repaired file.\n"
-			+ "5. Check logisim_status before long builds and before saving: it reports heap usage under 'memory', "
-			+ "'last_wire_repair', and which circuit is current. logisim_circuit_describe reports "
-			+ "'skewed_wire_count' and marks each bad wire 'broken'. Save early, and keep circuits modest.\n"
-			+ "6. Verify electrically after wiring: logisim_sim_propagate then logisim_sim_read_all. A net that "
-			+ "reads 'x' (undriven, floating) or 'e' (error, conflicting drivers) usually means a wire endpoint "
-			+ "missed a port, or two nets got joined. Component placement does not connect anything: a connection "
-			+ "exists only where a wire end coincides exactly with a port, or where a wire end lands on another "
-			+ "wire (that junction shorts them together).";
-
-	/** Added to the instructions when the server runs inside the user's Logisim window. */
-	private static final String LIVE_SUFFIX = "\n"
-			+ "\n"
-			+ "LIVE MODE - this server runs inside the user's Logisim window and the user is watching:\n"
-			+ "- You work on the project the user has open, not on one of your own. Tools act on the window the user "
-			+ "is looking at; logisim_circuit_select decides which circuit is on screen.\n"
-			+ "- Every call is visible: the canvas repaints, the components and wires you touched become the "
-			+ "selection, and each call is a named undo step in the Edit menu. Keep edits small and legible, and "
-			+ "prefer one batched logisim_wire_add over many single wire calls.\n"
-			+ "- Select the circuit you are about to change first, so the user sees the work happen, and check "
-			+ "logisim_gui_status for the window, the circuit, the selection, and whether the user has paused you "
-			+ "or turned on read-only mode.\n"
-			+ "- A call can time out when the user has a dialog open or is in the middle of something; that is not a "
-			+ "crash. Retry, or tell the user what to close.\n"
-			+ "- Opening a file brings up a new window (an already open file is focused instead). You may not close "
-			+ "windows or start a new empty project: that would discard the user's work.";
-
-	private final McpTransport transport;	private final McpSession session;
+	private final McpTransport transport;
+	private final McpSession session;
 	private final ToolRegistry registry;
 	private final PrintStream log;
 
@@ -233,7 +181,7 @@ public class McpServer {
 		ret.addProperty("protocolVersion", protocolVersion);
 		ret.add("capabilities", capabilities);
 		ret.add("serverInfo", serverInfo);
-		ret.addProperty("instructions", session.isLive() ? INSTRUCTIONS + LIVE_SUFFIX : INSTRUCTIONS);
+		ret.addProperty("instructions", McpInstructions.server(session.isLive()));
 		return ret;
 	}
 

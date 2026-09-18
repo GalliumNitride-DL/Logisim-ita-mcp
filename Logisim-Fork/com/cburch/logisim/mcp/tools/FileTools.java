@@ -16,6 +16,7 @@ import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -31,10 +32,7 @@ public final class FileTools {
 	}
 
 	public static McpTool newFile(final McpSession session) {
-		return new AbstractTool("logisim_file_new",
-				"Starts a new, empty Logisim project in memory, with a single circuit called 'main' and the "
-						+ "standard component libraries available. Nothing is written to disk until logisim_file_save "
-						+ "is called.",
+		return new AbstractTool("logisim_file_new", McpInstructions.FILE_NEW,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -50,14 +48,7 @@ public final class FileTools {
 	}
 
 	public static McpTool open(final McpSession session) {
-		return new AbstractTool("logisim_file_open",
-				"Opens an existing Logisim .circ file with Logisim's own reader. The file on disk is not modified. "
-						+ "If a circuit in the file refers to a library that cannot be found, opening fails with an "
-						+ "error instead of prompting for a file (this server is headless). This tool refuses to open a "
-						+ "file that contains a wire whose two ends differ in both x and y: Logisim cannot load such a "
-						+ "file at all (it would hang and then fail with 'Java heap space'), so the reply names the line "
-						+ "and the exact axis aligned replacement. For such a file, use logisim_file_recover and then "
-						+ "logisim_file_save_as.",
+		return new AbstractTool("logisim_file_open", McpInstructions.FILE_OPEN,
 				Schemas.object().req("path", Schemas.string("Path to the .circ file to open"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -83,13 +74,7 @@ public final class FileTools {
 	}
 
 	public static McpTool save(final McpSession session) {
-		return new AbstractTool("logisim_file_save",
-				"Writes the project to disk using Logisim's own writer, typically overwriting the file it was "
-						+ "opened from. Omit 'path' to save back to the file this session was opened from; use "
-						+ "logisim_file_save_as to write somewhere else. Any wire whose ends differ in both x and y "
-						+ "is repaired into axis aligned segments before writing, because a file containing one "
-						+ "could never be opened again; the repair is reported as 'wire_repair' in the reply when it "
-						+ "happens.",
+		return new AbstractTool("logisim_file_save", McpInstructions.FILE_SAVE,
 				Schemas.object().opt("path", Schemas.string("Destination path; defaults to the file this session "
 						+ "was opened from"))) {
 			@Override
@@ -135,16 +120,7 @@ public final class FileTools {
 	}
 
 	public static McpTool recover(final McpSession session) {
-		return new AbstractTool("logisim_file_recover",
-				"Opens a file that logisim_file_open refuses because it contains wires whose two ends differ in "
-						+ "both x and y. Logisim cannot load such a file at all (loading runs its wire repair, which "
-						+ "walks every point of every wire, and such a wire can never be walked to its end, so any "
-						+ "Logisim process would spin until the Java heap is exhausted). This tool replaces each of "
-						+ "those wires with its axis aligned parts while the file is being read, keeping both ends "
-						+ "connected, and then hands the result to Logisim's own reader. The file on disk is not "
-						+ "modified: inspect what was rewritten in the reply, then call logisim_file_save_as to write "
-						+ "the repaired file, which Logisim's own writer produces. Use it only as a rescue; an "
-						+ "ordinary logisim_file_open is the normal way to open a file.",
+		return new AbstractTool("logisim_file_recover", McpInstructions.FILE_RECOVER,
 				Schemas.object().req("path", Schemas.string("Path to the .circ file to recover"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -164,9 +140,7 @@ public final class FileTools {
 		};
 	}
 
-	public static McpTool saveAs(final McpSession session) {		return new AbstractTool("logisim_file_save_as",
-				"Writes the project to a new path using Logisim's own writer, leaving any previously opened file "
-						+ "untouched. After this call the session is associated with the new path.",
+	public static McpTool saveAs(final McpSession session) {		return new AbstractTool("logisim_file_save_as", McpInstructions.FILE_SAVE_AS,
 				Schemas.object().req("path", Schemas.string("Destination path for the .circ file"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -184,9 +158,7 @@ public final class FileTools {
 	}
 
 	public static McpTool close(final McpSession session) {
-		return new AbstractTool("logisim_file_close",
-				"Closes the current project and discards unsaved changes, releasing the circuit from memory. "
-						+ "The file on disk is never modified by this call.",
+		return new AbstractTool("logisim_file_close", McpInstructions.FILE_CLOSE,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -201,9 +173,7 @@ public final class FileTools {
 	}
 
 	public static McpTool info(final McpSession session) {
-		return new AbstractTool("logisim_file_info",
-				"Reports which file this session came from, whether it has unsaved changes, and the libraries "
-						+ "the project uses.",
+		return new AbstractTool("logisim_file_info", McpInstructions.FILE_INFO,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -244,3 +214,4 @@ public final class FileTools {
 		return ret;
 	}
 }
+

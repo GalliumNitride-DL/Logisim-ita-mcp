@@ -24,6 +24,7 @@ import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.McpHttpServer;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 import com.cburch.logisim.proj.Project;
 
 import com.google.gson.JsonArray;
@@ -45,12 +46,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool status(final McpSession session) {
-		return new AbstractTool("logisim_gui_status",				"What the user can see right now, and what state this session is in: whether the server runs inside "
-						+ "a Logisim window (live mode) or headless, the transport and its address, every open window "
-						+ "with its file, unsaved-changes flag, current circuit and selection, whether the user has "
-						+ "paused the agent or turned on read-only mode, and the tail of the activity log (the same "
-						+ "lines the user sees). Call this first in a session, and after anything that suggests the "
-						+ "user changed something themselves.",
+		return new AbstractTool("logisim_gui_status", McpInstructions.GUI_STATUS,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -119,10 +115,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool windows(final McpSession session) {
-		return new AbstractTool("logisim_gui_windows",
-				"Lists the Logisim windows that are open, with the file each one came from, whether it has unsaved "
-						+ "changes, which circuit is on screen, and the current selection. Pass one of the returned "
-						+ "titles or paths to logisim_gui_focus to bring that window to the front.",
+		return new AbstractTool("logisim_gui_windows", McpInstructions.GUI_WINDOWS,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -137,12 +130,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool focus(final McpSession session) {
-		return new AbstractTool("logisim_gui_focus",
-				"Brings a window to the front, and switches it to a circuit, so the user is looking at what the "
-						+ "agent is about to change. Use it before any burst of edits: watching a circuit change on "
-						+ "screen is the whole point of running the server inside the window. Identify the window by a "
-						+ "substring of its title or file path (as listed by logisim_gui_windows); omit it for the "
-						+ "window the user is already in.",
+		return new AbstractTool("logisim_gui_focus", McpInstructions.GUI_FOCUS,
 				Schemas.object()
 						.opt("window", Schemas.string("Part of a window title or file path; defaults to the window "
 								+ "the user is in"))
@@ -169,12 +157,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool select(final McpSession session) {
-		return new AbstractTool("logisim_gui_select",
-				"Highlights components and wires on screen by putting them into the selection, which is how the user "
-						+ "sees what a call is about to touch or has just touched. Every mutating tool does this for "
-						+ "the parts it changed; call this to point at something without changing it, for example to "
-						+ "show the user the two nets that shorted. Any component reference works: an id (\"c3\"), a "
-						+ "label (\"A\"), a port (\"c3.1\") or a location ([150,200]).",
+		return new AbstractTool("logisim_gui_select", McpInstructions.GUI_SELECT,
 				Schemas.object()
 						.req("components", Schemas.array(Schemas.any("a component reference"),
 								"Component references to select, or an empty list to clear the selection"))
@@ -203,9 +186,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool deselect(final McpSession session) {
-		return new AbstractTool("logisim_gui_deselect",
-				"Clears the selection, so the user sees nothing highlighted any more. Useful before handing control "
-						+ "back, or after an inspection that was only meant to point at something.",
+		return new AbstractTool("logisim_gui_deselect", McpInstructions.GUI_DESELECT,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -217,11 +198,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool readOnly(final McpSession session) {
-		return new AbstractTool("logisim_gui_read_only",
-				"Turns read-only mode on or off for this session. The user owns this switch: while it is on, every "
-						+ "tool that would change the project is refused with an error saying so, and only inspection "
-						+ "and simulation work. The MCP window in Logisim flips the same switch, so an agent that finds "
-						+ "editing refused should tell the user rather than fight it.",
+		return new AbstractTool("logisim_gui_read_only", McpInstructions.GUI_READ_ONLY,
 				Schemas.object().req("read_only", Schemas.bool("True to forbid changes, false to allow them"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -235,11 +212,7 @@ public final class GuiTools {
 	}
 
 	public static McpTool pause(final McpSession session) {
-		return new AbstractTool("logisim_gui_pause",
-				"Pauses or resumes the agent. While paused, every tool call is refused with a message that says the "
-						+ "user paused it, so the user can inspect or edit the circuit without the agent moving "
-						+ "underneath them. Like read-only mode this belongs to the user; it is exposed as a tool so "
-						+ "the mechanism is usable before the MCP window exists.",
+		return new AbstractTool("logisim_gui_pause", McpInstructions.GUI_PAUSE,
 				Schemas.object().req("paused", Schemas.bool("True to stop the agent, false to let it work again"))
 						.opt("reason", Schemas.string("Why, shown in the reply to the agent and in the window"))) {
 			@Override
@@ -288,3 +261,4 @@ public final class GuiTools {
 		throw new McpException("no open window matches '" + wanted + "'; call logisim_gui_windows to see them");
 	}
 }
+

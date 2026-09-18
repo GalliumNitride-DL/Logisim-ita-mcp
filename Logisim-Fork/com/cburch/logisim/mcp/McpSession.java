@@ -37,6 +37,8 @@ import com.cburch.logisim.data.Value;
 import com.cburch.logisim.file.Loader;
 import com.cburch.logisim.file.LogisimFile;
 import com.cburch.logisim.instance.Instance;
+import com.cburch.logisim.instance.InstanceFactory;
+import com.cburch.logisim.instance.Port;
 import com.cburch.logisim.instance.StdAttr;
 import com.cburch.logisim.prefs.AppPreferences;
 import com.cburch.logisim.proj.Action;
@@ -1712,6 +1714,7 @@ public class McpSession implements Closeable {
 		if (includePorts) {
 			JsonArray ports = new JsonArray();
 			List<String> pinLabels = subcircuitPinLabels(comp);
+			List<String> portNames = portNames(comp);
 			int index = 0;
 			for (EndData end : comp.getEnds()) {
 				if (end == null) {
@@ -1724,6 +1727,11 @@ public class McpSession implements Closeable {
 				port.addProperty("direction", portDirection(comp.getFactory(), end));
 				if (pinLabels != null && index < pinLabels.size()) {
 					port.addProperty("pin", pinLabels.get(index));
+				} else if (portNames != null && index < portNames.size()) {
+					String name = portNames.get(index);
+					if (name != null && !name.isEmpty()) {
+						port.addProperty("name", name);
+					}
 				}
 				ports.add(port);
 				index++;
@@ -1753,6 +1761,46 @@ public class McpSession implements Closeable {
 	}
 
 	/**
+	 * The library's own name for each port of a component ("D", "clock", "carry out"),
+	 * in port index order, or null when there is nothing reliable to report.
+	 *
+	 * <p>
+	 * This is the text Logisim shows when the user hovers over a pin, and in practice it
+	 * is the only written-down statement of what a port does. It matters because the
+	 * meanings are not guessable - a flip-flop's second input is a clock, a counter's
+	 * third is a clear, and an agent that assumes left-to-right data pins builds a
+	 * circuit that quietly does the wrong thing.
+	 * </p>
+	 *
+	 * <p>
+	 * The names come from the component's own ports, which the instance library computes per
+	 * instance (a flip-flop's clock is a port only once its trigger attribute is known), and
+	 * only when the count matches the component's ends, so that a component whose shape
+	 * cannot be described this way is left alone rather than described wrongly.
+	 * </p>
+	 */
+	private static List<String> portNames(Component comp) {
+		Instance instance = Instance.getInstanceFor(comp);
+		if (instance == null) {
+			return null;
+		}
+		List<Port> ports;
+		try {
+			ports = instance.getPorts();
+		} catch (Throwable t) {
+			return null;
+		}
+		if (ports == null || ports.size() != comp.getEnds().size()) {
+			return null;
+		}
+		List<String> ret = new ArrayList<String>();
+		for (Port port : ports) {
+			ret.add(port.getToolTip());
+		}
+		return ret;
+	}
+
+	/**
 	 * For a subcircuit instance, the label of the subcircuit pin behind each port, in
 	 * port index order, or null for anything else. SubcircuitFactory creates the ports
 	 * in exactly this order, so the two line up.
@@ -1773,7 +1821,8 @@ public class McpSession implements Closeable {
 		return ret;
 	}
 
-	private static String endType(int type) {
+	/** How a port's raw type reads to an agent: input, output or input_output. */
+	public static String endType(int type) {
 		if (type == EndData.INPUT_ONLY) {
 			return "input";
 		}

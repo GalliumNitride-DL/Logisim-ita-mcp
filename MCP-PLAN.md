@@ -54,7 +54,7 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 
 ## 3. Implemented
 
-### 3.1 Tools (38)
+### 3.1 Tools (46)
 
 | Group | Tools |
 |---|---|
@@ -154,6 +154,23 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 
 ### P1 — next safe work (no decisions needed)
 
+**Done since this list was written** (learned from watching agents use the server, see `MCP.md`):
+
+* **`logisim_help`** — reads Logisim's own manual (guide and library reference) offline, in three modes:
+  index, search, page. The manual is now packaged into the jar and the exe by `build-mcp.ps1`, which also
+  fixes the GUI's Help menu there; before this, a packaged build had no documentation in it at all.
+* **Pin meanings** — `logisim_component_catalog` now reports each port's library name (`"Clock: state updates
+  on trigger"`, `"Clear: When 1, pin state to 0 asynchronously"`), direction, width and position, and the same
+  names are attached to the ports of a component that `logisim_component_add` placed. The ports are built
+  from a throwaway instance of the component, because most libraries compute ports per instance rather than
+  per factory.
+* **No negative coordinates** — `logisim_component_add`, `logisim_component_move` and `logisim_wire_add`
+  refuse coordinates below zero (the component's body as well as its anchor, and every numeric wire point),
+  with a message saying what to use instead, so an agent cannot put work off the visible canvas.
+* **One place for the agent's briefing** — every tool description, the `initialize` instructions and the
+  wording of the refusals now live in `com.cburch.logisim.mcp.McpInstructions`. Verified that the move
+  changed no text: the `tools/list` output was captured before and after and compared line by line.
+
 3. **`logisim_circuit_nets`** — each net with its ports, labels and width, plus which port drives it.
    **Implemented and verified** (see §3.5); it walks the circuit directly rather than reaching into Logisim's
    package-private bundle map, so nothing was added inside an original package.
@@ -178,7 +195,9 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
    closing or new-project by the agent, start stopped, read-only off by default, highlighting replaces the
    selection, a freeze during heavy analysis is accepted, grouped undo deferred), and the transport is fixed
    as **HTTP only with a window**, because a GUI must not be the child of a client and Windows GUI exes have
-   no stdio. The HTTP transport itself is already implemented and verified; live mode is what remains.
+   no stdio. The HTTP transport itself is already implemented and verified, and live mode too: the server
+   runs inside the window, its switches live in the MCP window (`Help | MCP Server…`), and the settings
+   (auto-start, port, read-only, pause) are remembered.
 9. **GUI-side health**: a "Repair broken wires" menu item and an on-open check, so the GUI can rescue a
    damaged file by itself (a safety net once P0.1 lands).
    (The main part of this item — an MCP window with start/stop, port, read-only, pause and a log, plus an

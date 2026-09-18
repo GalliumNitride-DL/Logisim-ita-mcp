@@ -27,6 +27,7 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Session | `logisim_status`, `logisim_undo`, `logisim_circuit_info` |
 | Files | `logisim_file_new`, `logisim_file_open`, `logisim_file_recover`, `logisim_file_save`, `logisim_file_save_as`, `logisim_file_close`, `logisim_file_info` |
 | Discovery | `logisim_library_list`, `logisim_component_catalog` |
+| Documentation | `logisim_help` |
 | Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats`, `logisim_circuit_nets` |
 | Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status` |
@@ -37,6 +38,39 @@ Every tool returns JSON. Errors come back as `isError: true` with a message that
 says what to do next (for example *"a Pin has no attribute 'nonsense'; its
 attributes are: facing, output, width, ..."*), because an agent has to be able to
 recover on its own.
+
+### Finding out what a component's pins do
+
+Pins are where an agent gets into trouble: which input of a flip-flop is the clock,
+which is the clear, whether an enable is active high. Two tools answer that, and they
+answer it from Logisim itself rather than from guesswork:
+
+* **`logisim_component_catalog`** reports, for each component, its ports with the
+  library's own name for each one, the direction the value travels, the width and the
+  position relative to the component's anchor. A `D Flip-Flop` comes back as six ports
+  including `Current flip-flop state`, `Clock: state updates on trigger` and
+  `Clear: When 1, pin state to 0 asynchronously`. The same names appear on the `ports`
+  of whatever `logisim_component_add` places, so a component can be checked pin by pin
+  after placing it.
+* **`logisim_help`** reads Logisim's manual, which the program already ships: the user
+  guide and the library reference, one page per component, in plain text. With no
+  arguments it lists the manual, with `query` it searches every page and returns the
+  paragraph each hit matched, and with `topic` it returns one page - a page path
+  (`libs/mem/flipflops.html`), a word (`flipflops`) or a component name (`D Flip-Flop`,
+  which falls back to a search because the manual's page names do not always match the
+  component's). It needs no project open.
+
+### Staying on the canvas
+
+Coordinates are `x >= 0, y >= 0`, in multiples of 10. Logisim's canvas starts at the
+origin and grows right and down, so anything at a negative coordinate is valid but
+off-screen - a circuit that looks empty to the user. The editing tools therefore
+refuse a negative coordinate, from either end: `logisim_component_add` and
+`logisim_component_move` check the component's position *and* its body (a Pin's
+anchor is its centre, so a Pin at (0,0) has corners at -25) and tell the agent the
+coordinates to use instead; `logisim_wire_add` checks every point the agent wrote as
+numbers, while leaving symbolic endpoints (`"A"`, `"FA0.Cout"`) alone, since those
+name ports that already exist.
 
 ### Seeing the wiring through the netlist
 
@@ -306,9 +340,13 @@ MCP view in VS Code (or any MCP client).
 * **Nothing is written at all unless you ask**: editing tools only change the
   in-memory project.
 * **No existing Logisim behaviour was changed.** The MCP layer is a new package
-  (`com.cburch.logisim.mcp`) built on public Logisim API only; the single edit to
-  existing code is a four line dispatch at the top of `Main.main` that runs only
-  when the `-mcp` flag is present.
+  (`com.cburch.logisim.mcp`) built on public Logisim API only; the edits to existing
+  code are the dispatch at the top of `Main.main` (which runs only with `-mcp`), one
+  item in the Help menu, and the `doc/` tree being packaged into the jar.
+* **All of the agent's instructions live in one file**, `McpInstructions.java`: the text
+  returned by `initialize`, every tool description, and the wording of the refusals an
+  agent may hit. Nothing an agent reads is written anywhere else, so the briefing can be
+  reviewed and reworded in one place.
 * **Edits are undoable.** Every edit is committed as one Logisim `Action`, so
   `logisim_undo` works exactly like Edit → Undo in the GUI.
 * **Deterministic simulation.** The project's background `Simulator` thread is
@@ -338,27 +376,27 @@ MCP view in VS Code (or any MCP client).
 
 ## Roadmap
 
-1. **Interactive mode** — run the same server inside the normal Logisim GUI so an
-   agent can work on the circuit the user is looking at, over TCP. The transport
-   abstraction and the tool layer are already transport independent; what is
-   missing is starting the server from the GUI startup path and marshalling edits
-   onto the Swing event thread.
-2. **Net level introspection** — a `net_list` / `net_trace` tool built on
-   `CircuitWires`' bundle map (`BundleMap` is package private today, so this needs
-   a small bridge class inside `com.cburch.logisim.circuit`).
-3. **Single step propagation** — `Propagator.step()` / `isPending()` are package
+Done since this list was written: **interactive mode** (item 1 — the server now runs inside
+the GUI window over HTTP, with the MCP window for the switches), **net level introspection**
+(item 2, as `logisim_circuit_nets`, built on a union-find walk rather than the package private
+bundle map, so no bridge class was needed), and **documentation** (`logisim_help`, with the
+manual packaged into the jar and the library's own port names in `logisim_component_catalog`).
+
+Still open:
+
+1. **Single step propagation** — `Propagator.step()` / `isPending()` are package
    private; a bridge would allow delay accurate stepping, which is how signal
    races are debugged.
-4. **Memory and register tools** — `MemContents`, `Ram.loadImage` and
+2. **Memory and register tools** — `MemContents`, `Ram.loadImage` and
    `InstanceLogger` already provide everything needed to load a program image and
    dump registers, which is the heart of CPU debugging.
-5. **Visualisation** — render a circuit to PNG off screen with
+3. **Visualisation** — render a circuit to PNG off screen with
    `ComponentDrawContext` + `ImageIO` so a vision capable agent can look at the
    schematic.
-6. **Karnaugh map rendering** — the implicants behind `logisim_analyze_expression`
+4. **Karnaugh map rendering** — the implicants behind `logisim_analyze_expression`
    are already returned as minterm groups, which is what a K-map draws; a `grid`
    shaped view (one cell per row, per output) would make it directly readable.
-7. **Expression in, circuit out** — `OutputExpressions.setExpression` accepts a
+5. **Expression in, circuit out** — `OutputExpressions.setExpression` accepts a
    boolean expression and recomputes the truth table from it, so a
    `logisim_analyze_from_expression` tool would let an agent check a formula
    without drawing it first.
@@ -428,15 +466,23 @@ config, the sample `.circ` files and the workspace notes; those belong to the
 
 | Artifact | What it is |
 |---|---|
-| `build/dist/Logisim.jar` | the compiled classes plus the `resources` tree; use it with the jars from `libs/` on the classpath (`java -cp "Logisim.jar;libs/*" com.cburch.logisim.Main`) |
+| `build/dist/Logisim.jar` | the compiled classes plus the `resources` tree and the manual (`doc/`); use it with the jars from `libs/` on the classpath (`java -cp "Logisim.jar;libs/*" com.cburch.logisim.Main`) |
 | `build/dist/app/Logisim-jar-with-dependencies.jar` | the same with every dependency unpacked and a `Main-Class` manifest, so `java -jar … [-mcp]` works on its own |
 | `build/dist/Logisim-ITA.exe` | **one file**, the fat jar wrapped inside it by launch4j - the same shape as the released `Compiled/Logisim-ITA.exe` - with the application icon; it uses the Java runtime installed on the machine (1.8 or newer) |
 | `build/dist/Logisim/Logisim.exe` | a `jpackage` application image instead: the fat jar next to a bundled runtime, roughly 60 MB in the folder, nothing else needed on the machine |
 
 All of them were verified by driving the MCP handshake through them (`initialize` and
-`logisim_status`): each reported `2.15.0.1` and all 45 tools. The single exe was
+`logisim_status`): each reported `2.15.0.1` and all 46 tools. The single exe was
 checked deliberately from a directory that does **not** contain the jar, which is what
 proves the jar really is inside it.
+
+The **manual is packaged with the application** (`doc/`, all five languages, about
+4.5 MB): the GUI's Help menu resolves `doc/doc_en.hs` from the classpath, and
+`logisim_help` reads the same tree, so both work from a jar or an exe with no source
+tree anywhere near it. Verified by running the fat jar from an empty directory and
+reading `libs/mem/flipflops.html` through `logisim_help`, which reported its source as
+the jar itself. A build made with an older script has no manual in it, and
+`logisim_help` says so instead of failing obscurely.
 
 Two things to know. A Windows launcher built without `-Console` is a GUI subsystem
 executable and therefore has no stdin/stdout. That is fine for the server: started as

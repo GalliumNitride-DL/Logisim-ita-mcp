@@ -16,6 +16,7 @@ import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -28,10 +29,7 @@ public final class SessionTools {
 
 	public static McpTool status(final McpSession session, final String transportDescription,
 			final com.cburch.logisim.mcp.ToolRegistry registry) {
-		return new AbstractTool("logisim_status",
-				"Reports the state of the Logisim session: whether a file is open, where it came from, "
-						+ "which circuits exist, which circuit is current, and how the simulation currently stands. "
-						+ "Call this first if you are unsure what the session looks like.",
+		return new AbstractTool("logisim_status", McpInstructions.STATUS,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -90,10 +88,7 @@ public final class SessionTools {
 	}
 
 	public static McpTool undo(final McpSession session) {
-		return new AbstractTool("logisim_undo",
-				"Undoes the most recent change to the circuit (component or wire edits, attribute changes, "
-						+ "circuit creation). Logisim keeps a bounded undo history and has no redo, so an undone "
-						+ "change must be redone by repeating it.",
+		return new AbstractTool("logisim_undo", McpInstructions.UNDO,
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -105,8 +100,7 @@ public final class SessionTools {
 	}
 
 	public static McpTool circuitDetails(final McpSession session) {
-		return new AbstractTool("logisim_circuit_info",
-				"Describes the circuit that is currently being edited or simulated, including its pins.",
+		return new AbstractTool("logisim_circuit_info", McpInstructions.CIRCUIT_INFO,
 				Schemas.object().opt("circuit", Schemas.string("Circuit name; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -123,3 +117,4 @@ public final class SessionTools {
 		}
 	}
 }
+

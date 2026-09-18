@@ -29,6 +29,7 @@ import com.cburch.logisim.mcp.McpSession;
 import com.cburch.logisim.mcp.McpTool;
 import com.cburch.logisim.mcp.Schemas;
 import com.cburch.logisim.mcp.ToolContext;
+import com.cburch.logisim.mcp.McpInstructions;
 import com.cburch.logisim.std.gates.CircuitBuilder;
 
 import com.google.gson.JsonArray;
@@ -49,12 +50,7 @@ public final class AnalyzeTools {
 	}
 
 	public static McpTool truthTable(final McpSession session) {
-		return new AbstractTool("logisim_analyze_truth_table",
-				"Computes the complete truth table of a combinational circuit by driving every input pin through "
-						+ "every combination and reading every output pin, using Logisim's own analysis code. This is "
-						+ "the strongest way to verify a circuit an agent has just built. Cell values are 0, 1, x "
-						+ "(unknown/floating) or e (error/conflicting drivers); an oscillating circuit reports "
-						+ "'!!' for the affected rows. The number of rows is 2^inputs, so keep 'max_inputs' modest.",
+		return new AbstractTool("logisim_analyze_truth_table", McpInstructions.ANALYZE_TRUTH_TABLE,
 				Schemas.object()
 						.opt("circuit", Schemas.string("Circuit to analyse; defaults to the current circuit"))
 						.opt("max_inputs", Schemas.integer("Refuse to run when the circuit has more input pins than "
@@ -203,11 +199,7 @@ public final class AnalyzeTools {
 	 * </p>
 	 */
 	public static McpTool expression(final McpSession session) {
-		return new AbstractTool("logisim_analyze_expression",
-				"Reports the boolean expression of every output pin of a combinational circuit, derived from the "
-						+ "circuit's truth table by prime-implicant minimisation (the same code behind the Expression, "
-						+ "Minimized and Karnaugh-map tabs of Logisim's Analyze Circuit window). Also returns the prime "
-						+ "implicants, as the minterms each one covers, which is what a Karnaugh map draws as a group.",
+		return new AbstractTool("logisim_analyze_expression", McpInstructions.ANALYZE_EXPRESSION,
 				Schemas.object()
 						.opt("circuit", Schemas.string("Circuit to analyse; defaults to the current circuit"))
 						.opt("max_inputs", Schemas.integer("Refuse to run when the circuit has more input pins than "
@@ -320,11 +312,7 @@ public final class AnalyzeTools {
 	 * specification into gates.
 	 */
 	public static McpTool buildCircuit(final McpSession session) {
-		return new AbstractTool("logisim_circuit_build",
-				"Generates a gate level circuit from a truth table, using Logisim's own circuit builder. Supply "
-						+ "either 'from_circuit' (reuse the behaviour of an existing circuit) or 'inputs' plus "
-						+ "'outputs' to specify the table directly. The destination circuit is cleared first, so name a "
-						+ "fresh or empty circuit, or pass replace = true.",
+		return new AbstractTool("logisim_circuit_build", McpInstructions.CIRCUIT_BUILD,
 				Schemas.object()
 						.req("circuit", Schemas.string("Name of the destination circuit; created when it does not exist"))
 						.opt("from_circuit", Schemas.string("Take the truth table from this circuit instead of 'inputs' "
@@ -470,3 +458,4 @@ public final class AnalyzeTools {
 		return entry.getDescription();
 	}
 }
+
