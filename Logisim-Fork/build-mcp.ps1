@@ -9,6 +9,9 @@
 # A JDK is required: -JavaHome <jdk>, else JAVA_HOME, else javac.exe on PATH.
 # Do NOT add --release 8: part of this tree calls JDK 10+ APIs (guarded at run time
 # by Main.JAVA_VERSION), so it has to compile against a modern API.
+#
+# To start the GUI instead of the MCP server:
+#   java -cp "build/classes;.;libs/*" com.cburch.logisim.Main
 param(
     [switch]$Clean,
     [switch]$Run,
@@ -38,14 +41,23 @@ try {
     $count = (Get-Content $list).Count
 
     Write-Host "compiling $count sources with $javac"
+    # javac writes its "Note: ..." lines to stderr. With the strict preference above, and
+    # also when a caller pipes this script's output, PowerShell turns that into a
+    # terminating error, so relax it around the native calls and judge success by the
+    # exit code instead.
+    $strict = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $javac -source 8 -target 8 -encoding UTF-8 -nowarn -d $out -cp "libs/*" "@$list"
-    if ($LASTEXITCODE -ne 0) { throw "compilation failed" }
-    Write-Host "ok: $out"
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $strict
+    if ($code -ne 0) { throw "compilation failed: javac exited with $code" }
+    Write-Host "ok: $out ($count sources)"
 
     if ($Run) {
         # The project root has to be on the classpath, not resources/: the locale
         # bundles are looked up as resources/logisim/..., and without it every open
         # answers "No locale bundles are available".
+        $ErrorActionPreference = "Continue"
         & java "-Xmx512m" -cp "$out;.;libs/*" com.cburch.logisim.Main -mcp $args
     }
 } finally {
