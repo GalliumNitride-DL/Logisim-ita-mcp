@@ -163,6 +163,9 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 8. **`-mcp --with-gui`: embed the server in the GUI process**, so an agent drives the same live project the
    user is looking at. Needs a thread-safety pass (every `Project`/`Circuit` access marshalled onto the EDT
    with `SwingUtilities.invokeAndWait`), no `System.exit` from the MCP path, and dialog-safe error handling.
+   **Designed in [`MCP-GUI-DESIGN.md`](MCP-GUI-DESIGN.md)** — phased, with the exact Logisim-side additions
+   named (an MCP window, a preferences tab, the `--with-gui` entry point), all of them additive UI/plumbing
+   and inert unless `-mcp` is passed.
 9. **GUI-side health**: a "Repair broken wires" menu item and an on-open check, so the GUI can rescue a
    damaged file by itself (a safety net once P0.1 lands).
 10. **Observability**: `logisim_screenshot` (PNG of a circuit or region) and `logisim_sim_trace` (values of
