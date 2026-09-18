@@ -12,10 +12,15 @@
 #   ./build-mcp.ps1 -Exe       also build the fat jar and wrap it as a Windows
 #                              application image: build/dist/Logisim/Logisim.exe
 #                              (jpackage, JDK 14+, bundles its own runtime)
-#   ./build-mcp.ps1 -Console   make that exe a console launcher. Needed only for MCP
-#                              over stdio through the exe: a plain Windows launcher
+#   ./build-mcp.ps1 -Console   make the -Exe launcher a console one. Needed only for
+#                              MCP over stdio through the exe: a plain Windows launcher
 #                              has no stdio, so there use the fat jar instead, or run
 #                              the exe with -mcp --transport tcp --port 7331
+#   ./build-mcp.ps1 -Single    one exe file with the fat jar wrapped inside it
+#                              (build/dist/Logisim-ITA.exe, launch4j), the same shape
+#                              as the released Compiled/Logisim-ITA.exe. It needs a
+#                              Java 8 or newer runtime on the machine, unlike -Exe,
+#                              which carries its own. -Console applies here too.
 #   switches combine, e.g. ./build-mcp.ps1 -Clean -Jar -Exe
 #
 # A JDK is required: -JavaHome <jdk>, else JAVA_HOME, else javac.exe on PATH.
@@ -32,6 +37,7 @@ param(
     [switch]$Run,
     [switch]$Jar,
     [switch]$Exe,
+    [switch]$Single,
     [switch]$Console,
     [string]$JavaHome = $env:JAVA_HOME
 )
@@ -134,6 +140,64 @@ try {
             --description "Logisim 2.15.0.1 with the MCP server (-mcp)" @launcher
         if ($LASTEXITCODE -ne 0) { throw "jpackage failed" }
         Write-Host "ok: $(Join-Path $dist 'Logisim\Logisim.exe')"
+    }
+
+    if ($Single) {
+        # launch4j: a single exe file with the fat jar wrapped inside it, which is what
+        # the released Compiled/Logisim-ITA.exe is. The tooling is not part of this tree
+        # (it comes with the Maven build of the 2.16.2.2 branch), so it is staged out of
+        # the local Maven cache; nothing is downloaded.
+        $dist = "build\dist"
+        $fat = Join-Path $dist "app\Logisim-jar-with-dependencies.jar"
+        if (-not (Test-Path $fat)) { throw "-Single needs the fat jar: run with -Jar as well" }
+        $ErrorActionPreference = "Continue"
+
+        $m2 = Join-Path $env:USERPROFILE ".m2\repository"
+        $l4j = Join-Path $m2 "net\sf\launch4j"
+        $core = Get-ChildItem $l4j -Recurse -Filter "*core.jar" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $work = Get-ChildItem $l4j -Recurse -Directory -Filter "*workdir-win32" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $xstream = Get-ChildItem (Join-Path $m2 "com\thoughtworks\xstream") -Recurse -Filter "xstream-*.jar" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch 'sources|javadoc' } | Select-Object -First 1
+        if (-not $core -or -not $work -or -not $xstream) {
+            throw "-Single needs launch4j and xstream in the Maven cache (net.sf.launch4j:launch4j, com.thoughtworks.xstream:xstream)"
+        }
+
+        # launch4j looks for head/, bin/ and w32api/ beside its own jar, so stage it.
+        $tools = "build\tools\launch4j"
+        Remove-Item -Recurse -Force $tools -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $tools | Out-Null
+        Copy-Item $core.FullName $tools -Force
+        Copy-Item $xstream.FullName $tools -Force
+        Copy-Item -Recurse -Force (Join-Path $work.FullName "*") $tools
+
+        $header = if ($Console) { "console" } else { "gui" }
+        $icon = "resources\logisim\img\logisim-icon.ico"
+        $iconXml = if (Test-Path $icon) { "  <icon>$(Resolve-Path $icon)</icon>" } else { "" }
+        $config = "build\launch4j.xml"
+        @"
+<?xml version="1.0" encoding="UTF-8"?>
+<launch4jConfig>
+  <dontWrapJar>false</dontWrapJar>
+  <headerType>$header</headerType>
+  <jar>$((Resolve-Path $fat).Path)</jar>
+  <outfile>$((Resolve-Path $dist).Path)\Logisim-ITA.exe</outfile>
+  <chdir>.</chdir>
+  <priority>normal</priority>
+  <stayAlive>false</stayAlive>
+  <restartOnCrash>false</restartOnCrash>
+$iconXml
+  <jre>
+    <minVersion>1.8.0</minVersion>
+    <jdkPreference>preferJre</jdkPreference>
+    <runtimeBits>64/32</runtimeBits>
+  </jre>
+</launch4jConfig>
+"@ | Set-Content -Path $config -Encoding UTF8
+
+        & java "-cp" "$tools\*" net.sf.launch4j.Main $config | Select-String -Pattern 'Successfully created'
+        if ($LASTEXITCODE -ne 0) { throw "launch4j failed" }
+        $exe = Join-Path $dist "Logisim-ITA.exe"
+        Write-Host ("ok: {0} ({1:N1} MB, jar wrapped inside)" -f $exe, ((Get-Item $exe).Length / 1MB))
     }
 
     if ($Run) {

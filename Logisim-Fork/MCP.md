@@ -270,20 +270,29 @@ config, the sample `.circ` files and the workspace notes; those belong to the
 ```powershell
 .\build-mcp.ps1 -Jar                  # the two jars
 .\build-mcp.ps1 -Jar -Exe             # ... and the Windows application image
-.\build-mcp.ps1 -Jar -Exe -Console    # ... with a console launcher (see below)
+.\build-mcp.ps1 -Jar -Single          # ... and one exe with the jar wrapped inside
+.\build-mcp.ps1 -Jar -Single -Console # ... with a console launcher (see below)
 ```
 
 | Artifact | What it is |
 |---|---|
 | `build/dist/Logisim.jar` | the compiled classes plus the `resources` tree; use it with the jars from `libs/` on the classpath (`java -cp "Logisim.jar;libs/*" com.cburch.logisim.Main`) |
 | `build/dist/app/Logisim-jar-with-dependencies.jar` | the same with every dependency unpacked and a `Main-Class` manifest, so `java -jar … [-mcp]` works on its own |
-| `build/dist/Logisim/Logisim.exe` | a Windows application image: the fat jar plus a bundled runtime (roughly 60 MB in total) |
+| `build/dist/Logisim-ITA.exe` | **one file**, the fat jar wrapped inside it by launch4j - the same shape as the released `Compiled/Logisim-ITA.exe` - with the application icon; it uses the Java runtime installed on the machine (1.8 or newer) |
+| `build/dist/Logisim/Logisim.exe` | a `jpackage` application image instead: the fat jar next to a bundled runtime, roughly 60 MB in the folder, nothing else needed on the machine |
 
-All three were verified by driving the MCP handshake through them (`initialize` and
-`logisim_status`): each reported `2.15.0.1` and all 37 tools. Two things to know: a
-Windows launcher built without `-Console` is a GUI subsystem executable and therefore
-has no stdin/stdout, so for `-mcp` over stdio use the fat jar, or start the exe with
-`-mcp --transport tcp --port 7331`; and `-Exe` needs JDK 14 or newer for `jpackage`.
+All of them were verified by driving the MCP handshake through them (`initialize` and
+`logisim_status`): each reported `2.15.0.1` and all 37 tools. The single exe was
+checked deliberately from a directory that does **not** contain the jar, which is what
+proves the jar really is inside it.
+
+Two things to know. A Windows launcher built without `-Console` is a GUI subsystem
+executable and therefore has no stdin/stdout, so for `-mcp` over stdio either run the
+exe with `-mcp --transport tcp --port 7331`, or use the fat jar, or rebuild with
+`-Console`. And `-Exe` needs JDK 14 or newer for `jpackage`, while `-Single` needs the
+launch4j tooling: it is not part of this tree (the 2.16.2.2 branch gets it through
+Maven), so the script stages it out of the local Maven cache - `net.sf.launch4j:launch4j`
+plus its win32 workdir and `com.thoughtworks.xstream:xstream`. Nothing is downloaded.
 
 Upstream releases are built differently: `master` and the 2.16.2.2 branch use Maven
 (`maven-jar-plugin`, `maven-assembly-plugin` and `launch4j-maven-plugin`, main class
