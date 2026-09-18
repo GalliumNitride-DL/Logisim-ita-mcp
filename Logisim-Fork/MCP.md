@@ -183,6 +183,60 @@ practical reason on Windows: an executable built with a Windows GUI header has n
 usable stdio, so a client could not talk to it that way at all.) Headless mode keeps
 stdio as its default, so nothing about the existing setup changes.
 
+## Running inside the Logisim window (live mode)
+
+```bash
+java -cp "build/classes;.;libs/*" com.cburch.logisim.Main -mcp --with-gui [--port 7331]
+```
+
+`--with-gui` starts the server **next to the normal Logisim startup**: the window opens
+exactly as it always does, and the agent works on the project the user is looking at
+instead of on a project of its own. The transport is HTTP (see above); the port defaults
+to 7331 and the URL is printed on stderr at startup. Point a client at it with
+`{"type": "http", "url": "http://127.0.0.1:7331/mcp"}`.
+
+What the user sees, without reading a line of JSON:
+
+* every edit repaints the canvas immediately, in the circuit on screen;
+* the components and wires of the last call become the **selection**, so they are visibly
+  highlighted (the selection is replaced, not accumulated, so the agent never fights the
+  user for it);
+* each call is a named, undoable step in the Edit menu;
+* simulation values change colour live when the agent pokes inputs or ticks the clock;
+* opening a file brings up a new window; the activity log (also shown by
+  `logisim_gui_status`) records every call with its outcome and duration.
+
+### The tools that only exist with a window
+
+| Tool | What it does |
+|---|---|
+| `logisim_gui_status` | mode, transport and address, windows, current circuit, selection, read-only, paused, activity tail. Also works headless, where it reports `mode: headless` |
+| `logisim_gui_windows` | every open window with its file, unsaved-changes flag, current circuit and selection |
+| `logisim_gui_focus` | bring a window (and one of its circuits) to the front, so the user watches the right thing |
+| `logisim_gui_select` | highlight components/wires by reference, without changing anything |
+| `logisim_gui_deselect` | clear the selection |
+| `logisim_gui_read_only` | the user's switch: while it is on, every tool that would change the project is refused |
+| `logisim_gui_pause` | the user's brake: while it is on, tool calls are refused — except `logisim_gui_status` and the two switches themselves, so a pause is never a trap. A pause set from the Logisim window can only be released there, not by the agent |
+
+### What live mode refuses
+
+* `logisim_file_new` and `logisim_file_close`: they would discard the user's document.
+* `logisim_file_recover`: it is a headless rescue (it loads a separate project in memory).
+* Any edit while read-only or paused, with a message saying which of the two it is.
+
+`logisim_file_open` opens a **new window** (and focuses it if the file is already open,
+rather than showing Logisim's "lose your changes?" dialog); `logisim_file_save` uses
+Logisim's own Save when the project already has a file, and needs an explicit `path`
+otherwise, so no file chooser ever appears without the user asking for one.
+
+### Two behaviours worth knowing
+
+* Every call runs on Swing's event dispatch thread, with a 30 second deadline. If the
+  user has a dialog open, the call fails with a message saying so instead of hanging the
+  agent or freezing Logisim.
+* A heavy analysis (a truth table enumerates every row) blocks the window while it runs.
+  That is accepted as honest feedback; the tool documents the row limit it enforces.
+
 ## VS Code
 
 `.vscode/mcp.json` in this workspace already registers the server:

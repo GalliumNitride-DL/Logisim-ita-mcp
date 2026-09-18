@@ -38,6 +38,11 @@ public final class FileTools {
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
+				if (session.isLive()) {
+					throw new McpException("logisim_file_new is refused while the server runs inside the Logisim window: it "
+							+ "would replace the project the user has open. Use logisim_file_open, which brings up a new "
+							+ "window, or ask the user to create the project.");
+				}
 				session.newFile();
 				return describeState(session, "created a new empty project in memory");
 			}
@@ -57,6 +62,20 @@ public final class FileTools {
 			@Override
 			public JsonElement call(ToolContext ctx) {
 				File path = new File(ctx.requireString("path")).getAbsoluteFile();
+				if (session.isLive()) {
+					// Refuse a damaged file before Logisim's own Open does, because that path would
+					// report the failure with a dialog box and hang the call until it is dismissed.
+					session.requireOpenable(path);
+					boolean already = com.cburch.logisim.proj.Projects.findProjectFor(path) != null;
+					com.cburch.logisim.mcp.GuiBridge.openFile(path);
+					JsonObject ret = new JsonObject();
+					ret.addProperty("opened", path.getAbsolutePath());
+					ret.addProperty("new_window", Boolean.valueOf(!already));
+					ret.add("hint", Json.element(already
+							? "that file was already open, so its window was brought to the front instead of being reopened"
+							: "a new Logisim window is open for the user; the next tool call works on it"));
+					return ret;
+				}
 				session.open(path);
 				return describeState(session, "opened " + path.getAbsolutePath());
 			}
@@ -77,6 +96,23 @@ public final class FileTools {
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
 				String requested = ctx.optString("path", null);
+				if (requested == null && session.isLive()) {
+					if (session.path() == null) {
+						throw new McpException("this project has not been written to a file yet, so 'path' is required; "
+								+ "give the full path to write, or let the user save it from the File menu");
+					}
+					boolean ok = com.cburch.logisim.mcp.GuiBridge.saveProject(session.project());
+					if (!ok) {
+						throw new McpException("Logisim could not save '" + session.path().getAbsolutePath() + "'");
+					}
+					JsonObject ret = Json.object("saved", Boolean.TRUE, "path", session.path().getAbsolutePath(),
+							"dirty", Boolean.valueOf(session.file().isDirty()));
+					JsonArray healed = session.lastRepairReport();
+					if (healed != null && healed.size() > 0) {
+						ret.add("wire_repair", healed);
+					}
+					return ret;
+				}
 				File destination;
 				if (requested == null) {
 					if (session.path() == null) {
@@ -112,6 +148,7 @@ public final class FileTools {
 				Schemas.object().req("path", Schemas.string("Path to the .circ file to recover"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
+				session.requireHeadless(name());
 				File path = new File(ctx.requireString("path")).getAbsoluteFile();
 				session.recover(path);
 				JsonObject ret = describeState(session, "recovered " + path.getAbsolutePath());
@@ -153,6 +190,10 @@ public final class FileTools {
 				Schemas.object()) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
+				if (session.isLive()) {
+					throw new McpException("logisim_file_close is refused while the server runs inside the Logisim window: "
+							+ "closing would discard the user's work. Ask the user to close the window.");
+				}
 				session.close();
 				return Json.object("open", Boolean.FALSE);
 			}

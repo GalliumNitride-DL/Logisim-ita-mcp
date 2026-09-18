@@ -104,6 +104,7 @@ public final class EditTools {
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				mutation.add(component);
 				session.commit(mutation, "add " + factory.getName());
+				session.noteTouched(component);
 
 				JsonObject ret = session.describeComponent(component, true, true);
 				ret.addProperty("circuit", circuit.getName());
@@ -207,6 +208,7 @@ public final class EditTools {
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				mutation.replace(component, replacement);
 				session.commit(mutation, "move " + component.getFactory().getName());
+				session.noteTouched(component);
 				// keep the id the agent already knows, so its earlier references stay valid
 				session.transferId(component, replacement);
 
@@ -277,6 +279,7 @@ public final class EditTools {
 					applied.add(name);
 				}
 				session.commit(mutation, "set attributes");
+				session.noteTouched(component);
 				JsonObject ret = session.describeComponent(component, true, true);
 				ret.add("updated", applied);
 				return ret;
@@ -340,6 +343,7 @@ public final class EditTools {
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				JsonArray ids = new JsonArray();
 				JsonArray throughPorts = new JsonArray();
+				List<Wire> createdWires = new ArrayList<Wire>();
 				int created = 0;
 
 				for (List<Location> path : paths) {
@@ -361,6 +365,7 @@ public final class EditTools {
 						}
 						mutation.add(wire);
 						existing.add(wire);
+						createdWires.add(wire);
 						ids.add(session.idOf(wire));
 						created++;
 						Location blocked = portInside(a, b, ports);
@@ -371,6 +376,9 @@ public final class EditTools {
 					}
 				}
 				session.commit(mutation, "add wire");
+				for (Wire wire : createdWires) {
+					session.noteTouched(wire);
+				}
 
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());

@@ -67,8 +67,24 @@ public class McpServer {
 			+ "exists only where a wire end coincides exactly with a port, or where a wire end lands on another "
 			+ "wire (that junction shorts them together).";
 
-	private final McpTransport transport;
-	private final McpSession session;
+	/** Added to the instructions when the server runs inside the user's Logisim window. */
+	private static final String LIVE_SUFFIX = "\n"
+			+ "\n"
+			+ "LIVE MODE - this server runs inside the user's Logisim window and the user is watching:\n"
+			+ "- You work on the project the user has open, not on one of your own. Tools act on the window the user "
+			+ "is looking at; logisim_circuit_select decides which circuit is on screen.\n"
+			+ "- Every call is visible: the canvas repaints, the components and wires you touched become the "
+			+ "selection, and each call is a named undo step in the Edit menu. Keep edits small and legible, and "
+			+ "prefer one batched logisim_wire_add over many single wire calls.\n"
+			+ "- Select the circuit you are about to change first, so the user sees the work happen, and check "
+			+ "logisim_gui_status for the window, the circuit, the selection, and whether the user has paused you "
+			+ "or turned on read-only mode.\n"
+			+ "- A call can time out when the user has a dialog open or is in the middle of something; that is not a "
+			+ "crash. Retry, or tell the user what to close.\n"
+			+ "- Opening a file brings up a new window (an already open file is focused instead). You may not close "
+			+ "windows or start a new empty project: that would discard the user's work.";
+
+	private final McpTransport transport;	private final McpSession session;
 	private final ToolRegistry registry;
 	private final PrintStream log;
 
@@ -217,7 +233,7 @@ public class McpServer {
 		ret.addProperty("protocolVersion", protocolVersion);
 		ret.add("capabilities", capabilities);
 		ret.add("serverInfo", serverInfo);
-		ret.addProperty("instructions", INSTRUCTIONS);
+		ret.addProperty("instructions", session.isLive() ? INSTRUCTIONS + LIVE_SUFFIX : INSTRUCTIONS);
 		return ret;
 	}
 
@@ -239,9 +255,33 @@ public class McpServer {
 				throw McpException.invalidParams("'arguments' must be an object");
 			}
 		}
+		final McpTool target = tool;
+		final JsonObject args = arguments;
+		// One call, one trip to the event dispatch thread in live mode: adopt whatever the
+		// user is looking at, refuse when the user has paused or read-only mode is on, and
+		// highlight what the call changed when it is done.
+		java.util.concurrent.Callable<JsonElement> body = new java.util.concurrent.Callable<JsonElement>() {
+			@Override
+			public JsonElement call() throws Exception {
+				session.refresh();
+				if (session.isPaused() && !ToolRegistry.isPauseExempt(target.name())) {
+					String reason = session.pausedReason();
+					throw new McpException("the user has paused the agent"
+							+ (reason == null || reason.isEmpty() ? "" : " (" + reason + ")")
+							+ "; logisim_gui_status still works, and the work can be resumed from the Logisim window");
+				}
+				if (session.isReadOnly() && ToolRegistry.isMutating(target.name())) {
+					throw new McpException("the user has put this session in read-only mode, so '" + target.name()
+							+ "' is refused; the Logisim window can turn editing back on");
+				}
+				JsonElement result = target.call(new ToolContext(session, target.name(), args));
+				session.finishCall();
+				return result;
+			}
+		};
 		try {
 			long started = System.currentTimeMillis();
-			JsonElement result = tool.call(new ToolContext(session, name, arguments));
+			JsonElement result = session.isLive() ? EdtGate.call(body, EdtGate.DEFAULT_TIMEOUT_MS, name) : body.call();
 			ActivityLog.record(name + " ok (" + (System.currentTimeMillis() - started) + " ms)");
 			return toolResult(result);
 		} catch (Throwable t) {

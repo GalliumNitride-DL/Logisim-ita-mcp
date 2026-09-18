@@ -23,6 +23,7 @@ import com.cburch.logisim.mcp.tools.CircuitTools;
 import com.cburch.logisim.mcp.tools.DiagTools;
 import com.cburch.logisim.mcp.tools.EditTools;
 import com.cburch.logisim.mcp.tools.FileTools;
+import com.cburch.logisim.mcp.tools.GuiTools;
 import com.cburch.logisim.mcp.tools.NetTools;
 import com.cburch.logisim.mcp.tools.SessionTools;
 import com.cburch.logisim.mcp.tools.SimTools;
@@ -55,6 +56,7 @@ import com.cburch.logisim.mcp.tools.SimTools;
  */
 public final class McpMain {
 	private static final String FLAG = "-mcp";
+	private static final String GUI_FLAG = "--with-gui";
 
 	private McpMain() {
 	}
@@ -70,6 +72,110 @@ public final class McpMain {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * True when the server should run inside the normal Logisim window, which is what
+	 * {@code --with-gui} asks for: the user keeps the window, watches every change, and
+	 * an agent attaches over HTTP.
+	 */
+	public static boolean isGuiMode(String[] args) {
+		if (args == null) {
+			return false;
+		}
+		for (String arg : args) {
+			if (GUI_FLAG.equals(arg) || "--gui".equals(arg)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Starts the server alongside the GUI and returns the command line Logisim itself
+	 * should see: our own options are removed, and {@code --file} becomes a plain
+	 * argument so the normal startup opens that file in a window.
+	 *
+	 * <p>
+	 * The server runs on a thread of its own and Logisim's startup continues normally,
+	 * so the window appears as it always would. HTTP is the only transport here: a
+	 * window must not be the child of an MCP client (clients restart and kill what they
+	 * started, which would take unsaved work with it), and an executable built with a
+	 * Windows GUI header has no usable stdio at all.
+	 * </p>
+	 */
+	public static String[] startWithGui(String[] args) {
+		Map<String, String> options = parseOptions(args);
+		String host = options.containsKey("host") ? options.get("host") : "127.0.0.1";
+		int port = 7331;
+		if (options.containsKey("port")) {
+			try {
+				port = Integer.parseInt(options.get("port").trim());
+			} catch (NumberFormatException e) {
+				System.err.println("[logisim-mcp] invalid --port value: " + options.get("port") + "; using " + port);
+			}
+		}
+		if (options.containsKey("transport") && !"http".equalsIgnoreCase(options.get("transport"))) {
+			System.err.println("[logisim-mcp] with a window the transport is http; '" + options.get("transport")
+					+ "' is ignored (headless mode supports stdio and tcp)");
+		}
+
+		final McpSession session = new McpSession();
+		session.setLive(true);
+		final String boundHost = host;
+		final int boundPort = port;
+		Thread server = new Thread(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					ToolRegistry registry = registry(session, "http (gui)");
+					McpHttpServer http = new McpHttpServer(session, registry, boundHost, boundPort, System.err);
+					lastHttp = http;
+					System.err.println("[logisim-mcp] watching this window over MCP on " + http.url());
+				} catch (Throwable t) {
+					System.err.println("[logisim-mcp] could not start the MCP server on " + boundHost + ":" + boundPort
+							+ ": " + McpSession.message(t) + " (the window keeps working; set --port to another port)");
+				}
+			}
+		}, "logisim-mcp-http");
+		server.setDaemon(true);
+		server.start();
+		return stripMcpOptions(args, options);
+	}
+
+	/** The HTTP server of a GUI run, so a window can report on it later. */
+	private static volatile McpHttpServer lastHttp;
+
+	public static McpHttpServer httpServer() {
+		return lastHttp;
+	}
+
+	/** The command line with our own options taken out, keeping any file to open. */
+	private static String[] stripMcpOptions(String[] args, Map<String, String> options) {
+		java.util.List<String> ret = new java.util.ArrayList<String>();
+		String file = options.get("file");
+		for (int i = 0; i < args.length; i++) {
+			String arg = args[i];
+			if (arg == null || arg.isEmpty() || FLAG.equals(arg) || GUI_FLAG.equals(arg) || "--gui".equals(arg)) {
+				continue;
+			}
+			if (arg.equals("--transport") || arg.equals("--host") || arg.equals("--port") || arg.equals("--file")) {
+				i++; // skip this option's value as well
+				continue;
+			}
+			if (arg.startsWith("--transport=") || arg.startsWith("--host=") || arg.startsWith("--port=")
+					|| arg.startsWith("--file=") || arg.equals("--once")) {
+				continue;
+			}
+			if (file != null && !file.isEmpty() && arg.equals(file)) {
+				continue; // added again below, where Logisim expects a file to open
+			}
+			ret.add(arg);
+		}
+		if (file != null && !file.isEmpty()) {
+			ret.add(file);
+		}
+		return ret.toArray(new String[ret.size()]);
 	}
 
 	/** Runs the server; the return value is the process exit code. */
@@ -262,6 +368,14 @@ public final class McpMain {
 		registry.register(AnalyzeTools.expression(session));
 		registry.register(AnalyzeTools.buildCircuit(session));
 		registry.register(DiagTools.repairWires(session));
+
+		registry.register(GuiTools.status(session));
+		registry.register(GuiTools.windows(session));
+		registry.register(GuiTools.focus(session));
+		registry.register(GuiTools.select(session));
+		registry.register(GuiTools.deselect(session));
+		registry.register(GuiTools.readOnly(session));
+		registry.register(GuiTools.pause(session));
 		return registry;
 	}
 

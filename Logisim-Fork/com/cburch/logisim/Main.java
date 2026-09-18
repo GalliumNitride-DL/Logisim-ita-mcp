@@ -59,11 +59,16 @@ public class Main {
 
 	public static void main(String[] args) throws Exception {
 		// MCP (Model Context Protocol) mode: an AI agent drives Logisim over JSON-RPC
-		// instead of the GUI. This is handled before anything else so that the GUI,
-		// the splash screen, the auto-updater and the online-user reporting are never
-		// started.
+		// instead of the GUI. Headless is handled before anything else so that the GUI,
+		// the splash screen, the auto-updater and the online-user reporting never start;
+		// with --with-gui the server is started next to the normal startup instead, and
+		// the window opens as it always would, for the user to watch the agent work.
 		if (com.cburch.logisim.mcp.McpMain.wantsMcp(args)) {
-			System.exit(com.cburch.logisim.mcp.McpMain.run(args));
+			if (com.cburch.logisim.mcp.McpMain.isGuiMode(args)) {
+				args = com.cburch.logisim.mcp.McpMain.startWithGui(args);
+			} else {
+				System.exit(com.cburch.logisim.mcp.McpMain.run(args));
+			}
 		}
 		Startup startup = Startup.parseArgs(args);
 		if (startup != null) {

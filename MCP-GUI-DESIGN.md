@@ -87,9 +87,11 @@ MCP client ── stdio (client spawns the GUI) ─┐
 | 6 | Read-only and pause switches honoured centrally in the tool registry | the user can freeze or restrict the agent |
 | 7 | `instructions` update for live mode: the user is watching, keep edits small and legible, focus the circuit being changed, prefer one batched edit | aligns the agent with the new situation |
 
-Two API details to confirm while implementing: the correct pair is `Selection.addAll(...)` to highlight and
-`Selection.clearSelected()` to deselect — **not** `SelectionActions.clear(...)`, which is the *delete*
-command.
+Confirmed while implementing: highlighting uses `Selection.addAll(...)`, and deselecting is
+`SelectionBase.clear(CircuitMutation)`, which is package private - the public-looking
+`SelectionActions.clear/drop/dropAll` remove the components from the *circuit* instead. A
+five-line additive bridge (`gui/main/SelectionBridge.java`) widens that access, and refuses to
+clear while the user has components in mid air (a paste or drag not yet dropped).
 
 ## 5. Changes to Logisim itself (the exception you approved)
 
@@ -136,14 +138,25 @@ format, existing menus and shortcuts, and the default startup path (no `-mcp`, n
 
 ## 8. Phases
 
-**Phase 1 — live mode without touching Logisim.**
-The HTTP transport needed for it is **already implemented and verified** (`--transport http`, `McpServer`
-refactored to serve one request at a time over HTTP as well as streams). What remains: the `--with-gui`
-entry point, live project resolution, the EDT gate, auto-highlight, the `gui_*` tools, instructions update,
-docs. The user starts Logisim with the flag, presses nothing, and attaches a client to
-`http://127.0.0.1:7331/mcp`.
-*Verify:* headless regression suite unchanged; in live mode watch an edit, a circuit switch, a simulation,
-an undo; confirm a modal dialog no longer hangs the agent.
+**Phase 1 — live mode without touching Logisim (DONE).**
+Implemented: the `--with-gui` entry point (`Main` hands the stripped command line to the normal
+startup and the server runs on a background thread), live project resolution from the focused window,
+the `EdtGate` (30 s deadline, reported as an ordinary tool error), auto-highlighting of what each call
+touched, the seven `logisim_gui_*` tools, live-mode file rules (`open` opens a window or focuses an
+existing one, `save` uses Logisim's Save, `new`/`close`/`recover` are refused), and the `READ THIS
+FIRST` block for live mode in the server instructions. The only Logisim-side addition needed was one
+five-line bridge (`gui/main/SelectionBridge.java`) to widen access to the existing deselect, which is
+the kind of exception agreed for exposing data.
+
+Verified live (window open, HTTP on 7331): status reports `live` with one window; an edit lands in the
+open project; the touched components become the selection (an add selects the pin, a wire call
+replaces it with the new wire); read-only and pause both refuse edits with a message naming which; the
+status read and the two switches stay callable while paused (a fix found by testing: the pause used to
+block the tools needed to release it, which made it a trap); `file_new` and `file_close` are refused;
+the activity log records each call.
+
+*Verify next:* the same in a hand-started window with a client attached over HTTP after a client
+restart, a modal dialog open (expect the deadline error), and two windows open (focus switching).
 
 **Phase 2 — the user-facing controls (needs the core additions B and C).**
 MCP window (state, Start/Stop, port, read-only, pause, log tail), MCP preferences tab, and the

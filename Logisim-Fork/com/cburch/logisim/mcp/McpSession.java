@@ -124,9 +124,147 @@ public class McpSession implements Closeable {
 	/** Set when a file had to be opened by rewriting non-axis-aligned wires. */
 	private JsonArray lastRecovery;
 
+	/**
+	 * True when this session drives the windows of a running Logisim instead of a
+	 * project of its own. Then the project is adopted from the window the user is
+	 * looking at, every touch of it happens on the event dispatch thread, and what a
+	 * call changes is put into the selection so the user can see it.
+	 */
+	private boolean live;
+
+	/** Components and wires the current call changed, to be highlighted when it ends. */
+	private final List<Component> touched = new ArrayList<Component>();
+
+	/**
+	 * Set by the user (through the MCP window, or the tools meanwhile) to restrain the agent.
+	 * A pause set from the window can only be released there: the agent must not be able to
+	 * remove the user's brake.
+	 */
+	private boolean readOnly;
+	private boolean paused;
+	private boolean pausedByUser;
+	private String pausedReason;
+
 	/** Matches the wire elements Logisim's writer emits, whatever the coordinates are. */
 	private static final java.util.regex.Pattern WIRE_ELEMENT = java.util.regex.Pattern
 			.compile("<wire\\s+from=\"\\(\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)\"\\s+to=\"\\(\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)\"");
+
+	// ------------------------------------------------------------------ live mode
+
+	public boolean isLive() {
+		return live;
+	}
+
+	public void setLive(boolean value) {
+		this.live = value;
+	}
+
+	public boolean isReadOnly() {
+		return readOnly;
+	}
+
+	public void setReadOnly(boolean value) {
+		this.readOnly = value;
+	}
+
+	public boolean isPaused() {
+		return paused;
+	}
+
+	/** True when the pause was set from the Logisim window rather than by a tool call. */
+	public boolean isPausedByUser() {
+		return pausedByUser;
+	}
+
+	public String pausedReason() {
+		return pausedReason;
+	}
+
+	public void setPaused(boolean value, String reason) {
+		setPaused(value, reason, false);
+	}
+
+	public void setPaused(boolean value, String reason, boolean byUser) {
+		this.paused = value;
+		this.pausedReason = value ? reason : null;
+		this.pausedByUser = value && byUser;
+	}
+
+	/**
+	 * In live mode, adopts the project of the window the user is looking at, so that a
+	 * tool call always works on what is on screen - including a file the user opened in
+	 * the meantime. Called once per tool call, on the event dispatch thread.
+	 */
+	public void refresh() {
+		if (!live) {
+			return;
+		}
+		Project current = GuiBridge.project();
+		if (current == project) {
+			return;
+		}
+		project = current;
+		file = current == null ? null : current.getLogisimFile();
+		loader = file == null ? null : file.getLoader();
+		path = loader == null ? null : loader.getMainFile();
+		// ids belong to the components of one project, so they start over with a new one
+		ids.clear();
+		byId.clear();
+		nextId = 1;
+	}
+
+	/** Remembers something a tool changed, so the user can see it highlighted. */
+	public void noteTouched(Component comp) {
+		if (comp != null && live) {
+			touched.add(comp);
+		}
+	}
+
+	public void noteTouched(java.util.Collection<? extends Component> comps) {
+		if (comps != null && live) {
+			for (Component comp : comps) {
+				noteTouched(comp);
+			}
+		}
+	}
+
+	/**
+	 * Ends a tool call: in live mode the components the call touched become the
+	 * selection, which is how the user sees what just changed without reading a single
+	 * line of JSON. The selection is replaced rather than added to, so the agent never
+	 * fights the user for it.
+	 */
+	public void finishCall() {
+		if (!live) {
+			return;
+		}
+		try {
+			if (!touched.isEmpty()) {
+				GuiBridge.select(project, new ArrayList<Component>(touched));
+			}
+		} catch (Throwable t) {
+			// highlighting is a courtesy: never fail a call over it
+		} finally {
+			touched.clear();
+		}
+	}
+
+	/** Refuses a tool that only makes sense in headless mode. */
+	public void requireHeadless(String tool) {
+		if (live) {
+			throw new McpException(tool + " is not available while the MCP server runs inside the Logisim window: "
+					+ "the user owns this project. Use logisim_gui_status to see what is on screen, or run the server "
+					+ "in headless mode (java -jar Logisim.jar -mcp) to work on files of your own.");
+		}
+	}
+
+	/** Refuses a tool that only makes sense with a window. */
+	public void requireLive(String tool) {
+		if (!live) {
+			throw new McpException(tool + " needs a Logisim window; start the server with --with-gui, or use the "
+					+ "headless tools on a project of your own.");
+		}
+	}
 
 	// ------------------------------------------------------------------
 	// lifecycle
@@ -137,8 +275,11 @@ public class McpSession implements Closeable {
 	}
 
 	public void requireOpen() {
+		refresh();
 		if (!isOpen()) {
-			throw new McpException("no file is open; call logisim_file_new or logisim_file_open first");
+			throw new McpException(live
+					? "no Logisim window with a project is open; the user has to open one"
+					: "no file is open; call logisim_file_new or logisim_file_open first");
 		}
 	}
 

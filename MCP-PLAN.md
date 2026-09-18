@@ -16,10 +16,10 @@ by a workspace clean, which is why it now lives in the repository).*
 | Workspace | `D:\gzr\HUST2024\AiC\Logisim`, branch **`agents/mcp-support-2.15.0.1`**, HEAD `bdc2086` |
 | Base | commit `da78b00` (tag `v2.15.0.1`) — Eclipse layout, no Maven, no JSON dependency |
 | Branches | `agents/mcp-support-2.15.0.1` (here, Logisim **2.15.0.1**), `agents/mcp-support-2.16.2.2` (`e47c347`, same layer on **2.16.2.2**), `master` = upstream `ad7c02a`. Nothing is pushed anywhere. |
-| Entry point | `com.cburch.logisim.Main -mcp` (also `--transport tcp --port N`, `--file f.circ`, `--help`) |
+| Entry point | `com.cburch.logisim.Main -mcp` (headless) or `-mcp --with-gui` (inside the window); options `--transport stdio\|tcp\|http`, `--port`, `--host`, `--file f.circ`, `--help` |
 | Code | `Logisim-Fork/com/cburch/logisim/mcp` (13 files) + `.../mcp/tools` (9 files) |
 | Existing code touched | `Main.main` (6-line dispatch), `gui/log/ComponentSelector.java` (one line, upstream's own later fix) |
-| Tools | **38** (see §3) |
+| Tools | **45** (see §3) |
 | Build | `Logisim-Fork/build-mcp.ps1` → `Logisim-Fork/build/classes`; see §7 |
 | Packaging | `build-mcp.ps1 -Jar -Exe -Single [-Console]` → jars and two kinds of Windows exe (§3.3) |
 | Editor setup | root `.classpath` + `.vscode/settings.json` describe the layout; JDT output is `Logisim-Fork/build/jdt` |
@@ -62,6 +62,7 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 | Files | `logisim_file_new`, `logisim_file_open`, `logisim_file_recover`, `logisim_file_save`, `logisim_file_save_as`, `logisim_file_close`, `logisim_file_info` |
 | Discovery | `logisim_library_list`, `logisim_component_catalog` (libraries, types, attributes, option lists) |
 | Circuits | `logisim_circuit_list`, `logisim_circuit_describe` (components, ports, wires, `skewed_wire_count`, `broken` flags), `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_stats`, `logisim_circuit_nets` (nets: wires, ports, labels, drivers, unconnected ports, tunnel notes) |
+| GUI (live mode) | `logisim_gui_status`, `logisim_gui_windows`, `logisim_gui_focus`, `logisim_gui_select`, `logisim_gui_deselect`, `logisim_gui_read_only`, `logisim_gui_pause` |
 | Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add` (`points` / `paths` / `from`+`to`, auto-routing), `logisim_wire_remove` |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
@@ -122,6 +123,10 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
   reports 3 nets with `drivers: 1` each (an input pin counts as the driver, an output pin does not), flags a
   stray pin under `unconnected_ports`, filters correctly by `net`/`port`, and a deliberate two-input-pin net
   reports `drivers: 2` — which the simulator then confirms by reading `e`.
+- **Live mode (P2.8, the first phase) is implemented and verified** with a real window: the server runs
+  inside Logisim, edits land in the open project and are highlighted on the canvas, read-only and pause
+  refuse edits with a message naming which, the status read and both switches stay callable while paused,
+  and `file_new`/`file_close` are refused so the user's document cannot be discarded.
 
 ---
 
@@ -176,6 +181,9 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
    no stdio. The HTTP transport itself is already implemented and verified; live mode is what remains.
 9. **GUI-side health**: a "Repair broken wires" menu item and an on-open check, so the GUI can rescue a
    damaged file by itself (a safety net once P0.1 lands).
+   (The main part of this item — an MCP window with start/stop, port, read-only, pause and a log, plus an
+   MCP tab in Preferences — is Phase 2 of [`MCP-GUI-DESIGN.md`](MCP-GUI-DESIGN.md); live mode itself is
+   already implemented and verified, see §3.5.)
 10. **Observability**: `logisim_screenshot` (PNG of a circuit or region) and `logisim_sim_trace` (values of
     named pins over n ticks, i.e. sequence tables for clocked circuits).
 
