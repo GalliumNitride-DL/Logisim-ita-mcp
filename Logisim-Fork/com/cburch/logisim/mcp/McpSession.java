@@ -236,19 +236,63 @@ public class McpSession implements Closeable {
 	 * line of JSON. The selection is replaced rather than added to, so the agent never
 	 * fights the user for it.
 	 */
-	public void finishCall() {
+	public String finishCall() {
 		if (!live) {
-			return;
+			touched.clear();
+			return null;
 		}
 		try {
-			if (!touched.isEmpty()) {
-				GuiBridge.select(project, new ArrayList<Component>(touched));
+			if (touched.isEmpty()) {
+				return null;
 			}
+			Circuit displayed = project == null ? null : project.getCurrentCircuit();
+			Circuit edited = null;
+			for (Component comp : touched) {
+				edited = circuitHolding(comp);
+				break;
+			}
+			if (edited != null && edited == displayed && allIn(edited, touched)) {
+				GuiBridge.select(project, new ArrayList<Component>(touched));
+				return null;
+			}
+			String where = edited == null ? "a circuit that is no longer open" : "'" + edited.getName() + "'";
+			String showing = displayed == null ? "nothing" : "'" + displayed.getName() + "'";
+			return "the edits are in circuit " + where + ", but the window is showing " + showing
+					+ ", so nothing was highlighted: highlighting one circuit's parts over another's would show the "
+					+ "user something that is not there. Call logisim_circuit_select with circuit " + where
+					+ " to bring it to the front.";
 		} catch (Throwable t) {
 			// highlighting is a courtesy: never fail a call over it
+			return null;
 		} finally {
 			touched.clear();
 		}
+	}
+
+	/** The circuit of this project that holds a component, or null when none does. */
+	private Circuit circuitHolding(Component comp) {
+		if (comp == null || project == null) {
+			return null;
+		}
+		try {
+			for (Circuit circuit : file().getCircuits()) {
+				if (circuit.contains(comp)) {
+					return circuit;
+				}
+			}
+		} catch (Throwable t) {
+			return null;
+		}
+		return null;
+	}
+
+	private static boolean allIn(Circuit circuit, java.util.Collection<? extends Component> comps) {
+		for (Component comp : comps) {
+			if (!circuit.contains(comp)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/** Refuses a tool that only makes sense in headless mode. */
@@ -1373,7 +1417,7 @@ public class McpSession implements Closeable {
 	 *            report only the net this location belongs to, or null
 	 */
 	public JsonObject describeNets(Circuit circuit, String netFilter, Location portFilter, boolean includeUnconnected,
-			int limit) {
+			boolean problemsOnly, int limit) {
 		indexComponents(circuit);
 		List<Wire> wires = new ArrayList<Wire>(circuit.getWires());
 		Map<Location, Location> parent = new HashMap<Location, Location>();
@@ -1477,6 +1521,7 @@ public class McpSession implements Closeable {
 		JsonArray nets = new JsonArray();
 		int index = 0;
 		int shown = 0;
+		int clean = 0;
 		boolean truncated = false;
 		for (Map.Entry<Location, NetBucket> entry : ordered) {
 			index++;
@@ -1526,7 +1571,7 @@ public class McpSession implements Closeable {
 				// Logisim stores an input pin as OUTPUT_ONLY because inside the circuit it
 				// is the source of the wire, while an output pin only reads it.
 				int endType = ref.end.getType();
-				if (endType == EndData.OUTPUT_ONLY) {
+				if (PortFixups.isDriver(ref.component.getFactory().getName(), ref.index, endType)) {
 					drivers++;
 				} else if (endType != EndData.INPUT_ONLY) {
 					bidirectional++;
@@ -1555,6 +1600,8 @@ public class McpSession implements Closeable {
 				notes.add(bidirectional + " port(s) here can drive as well when enabled (tristate or bus), so this "
 						+ "net reads 'x' while nothing is driving it");
 			}
+			boolean trouble = drivers > 1 || (drivers == 0 && bidirectional == 0 && bucket.ports.size() > 0)
+					|| (bucket.wires.isEmpty() && (bucket.ports.size() > 1 || bucket.sharedLocation));
 			for (String label : bucket.tunnels) {
 				Integer count = tunnelNets.get(label);
 				if (count != null && count.intValue() > 1) {
@@ -1564,6 +1611,10 @@ public class McpSession implements Closeable {
 			}
 			if (notes.size() > 0) {
 				net.add("notes", notes);
+			}
+			if (problemsOnly && !trouble) {
+				clean++;
+				continue;
 			}
 			nets.add(net);
 		}
@@ -1577,6 +1628,10 @@ public class McpSession implements Closeable {
 			ret.addProperty("truncated", Boolean.TRUE);
 		}
 		ret.add("nets", nets);
+		if (problemsOnly) {
+			ret.addProperty("nets_omitted_as_clean", clean);
+			ret.addProperty("problems_only", Boolean.TRUE);
+		}
 		if (includeUnconnected && unconnected.size() > 0) {
 			JsonArray ports = new JsonArray();
 			for (PortRef ref : unconnected) {
@@ -1637,7 +1692,10 @@ public class McpSession implements Closeable {
 		if (label != null && !label.isEmpty()) {
 			port.addProperty("label", label);
 		}
-		port.addProperty("direction", portDirection(comp.getFactory(), ref.end));
+		port.addProperty("direction", portDirection(comp.getFactory(), ref.index, ref.end));
+		if (PortFixups.isCorrected(comp.getFactory().getName(), ref.index)) {
+			port.addProperty("direction_note", PortFixups.NOTE);
+		}
 		port.addProperty("width", ref.end.getWidth().getWidth());
 		port.add("loc", point(ref.end.getLocation()));
 		return port;
@@ -1715,6 +1773,8 @@ public class McpSession implements Closeable {
 			JsonArray ports = new JsonArray();
 			List<String> pinLabels = subcircuitPinLabels(comp);
 			List<String> portNames = portNames(comp);
+			String componentId = idOf(comp);
+			java.util.Set<String> ambiguous = ambiguousPortTokens(portNames);
 			int index = 0;
 			for (EndData end : comp.getEnds()) {
 				if (end == null) {
@@ -1724,13 +1784,23 @@ public class McpSession implements Closeable {
 				port.addProperty("index", index);
 				port.add("loc", point(end.getLocation()));
 				port.addProperty("width", end.getWidth().getWidth());
-				port.addProperty("direction", portDirection(comp.getFactory(), end));
+				port.addProperty("direction", portDirection(comp.getFactory(), index, end));
+				if (PortFixups.isCorrected(comp.getFactory().getName(), index)) {
+					port.addProperty("direction_note", PortFixups.NOTE);
+				}
+				// A reference that can be pasted straight into a wire endpoint, so the agent
+				// never has to turn an index back into arithmetic.
+				port.addProperty("ref", componentId + "." + index);
 				if (pinLabels != null && index < pinLabels.size()) {
 					port.addProperty("pin", pinLabels.get(index));
 				} else if (portNames != null && index < portNames.size()) {
 					String name = portNames.get(index);
 					if (name != null && !name.isEmpty()) {
 						port.addProperty("name", name);
+						String token = portRefToken(name, ambiguous);
+						if (token != null) {
+							port.addProperty("ref_by_name", componentId + "." + token);
+						}
 					}
 				}
 				ports.add(port);
@@ -1752,12 +1822,157 @@ public class McpSession implements Closeable {
 	 * it sees on screen, so the pin's user facing role is reported instead.
 	 * </p>
 	 */
-	private static String portDirection(ComponentFactory factory, EndData end) {
+	private static String portDirection(ComponentFactory factory, int index, EndData end) {
 		int type = end.getType();
 		if (factory instanceof Pin) {
 			return type == EndData.OUTPUT_ONLY ? "input" : "output";
 		}
-		return endType(type);
+		String corrected = PortFixups.correction(factory.getName(), index);
+		return corrected != null ? corrected : endType(type);
+	}
+
+	/**
+	 * A port name that can be written after a dot, or null when nothing short and unambiguous
+	 * identifies the port. "Less", "Q" and "clock" travel well; "Clear: When 1, pin state to 0"
+	 * does not, and neither does a word that two ports share.
+	 */
+	private static String portRefToken(String name, java.util.Set<String> ambiguous) {
+		String trimmed = name.trim();
+		if (trimmed.isEmpty()) {
+			return null;
+		}
+		String token = refToken(trimmed);
+		if (token != null && !ambiguous.contains(portNameKey(token))) {
+			return token;
+		}
+		String first = firstWord(trimmed);
+		String firstToken = refToken(first);
+		if (firstToken != null && !ambiguous.contains(portNameKey(firstToken))) {
+			return firstToken;
+		}
+		return null;
+	}
+
+	/**
+	 * The port-name words that belong to more than one port of a component, so a reference
+	 * built from them would be refused later. Both halves of a name count: "clock" is a fine
+	 * reference for "Clock: state updates on trigger" as long as no other port starts with it.
+	 */
+	private static java.util.Set<String> ambiguousPortTokens(List<String> names) {
+		java.util.Set<String> ambiguous = new java.util.HashSet<String>();
+		if (names == null) {
+			return ambiguous;
+		}
+		java.util.Set<String> seen = new java.util.HashSet<String>();
+		for (String name : names) {
+			if (name == null || name.isEmpty()) {
+				continue;
+			}
+			String full = refToken(name.trim());
+			if (full == null) {
+				full = refToken(firstWord(name.trim()));
+			}
+			if (full == null) {
+				continue;
+			}
+			String key = portNameKey(full);
+			if (!seen.add(key)) {
+				ambiguous.add(key);
+			}
+		}
+		return ambiguous;
+	}
+
+	/**
+	 * A port name that can be written after a dot, or null when the name is not one token.
+	 * "Less", "Q" and "clock" travel well; "Clear: When 1, pin state to 0" does not.
+	 */
+	private static String refToken(String name) {
+		String trimmed = name.trim();
+		if (trimmed.isEmpty()) {
+			return null;
+		}
+		for (int i = 0; i < trimmed.length(); i++) {
+			char c = trimmed.charAt(i);
+			boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+			if (!ok) {
+				return null;
+			}
+		}
+		return trimmed;
+	}
+
+	/**
+	 * The location of a port named in an endpoint ("c22.Less", "c18.Q"): the library's own
+	 * name for the port, or the first word of it, so "c22.clock" reaches "Clock: state
+	 * updates on trigger". A name that matches more than one port is an error that lists
+	 * them, because a guessed port is worse than a failed call.
+	 */
+	private Location portByName(Component owner, String portText) {
+		List<String> names = portNames(owner);
+		if (names == null) {
+			return null;
+		}
+		List<EndData> ends = owner.getEnds();
+		String wanted = portNameKey(portText);
+		if (wanted.isEmpty()) {
+			return null;
+		}
+		List<Integer> exact = new ArrayList<Integer>();
+		List<Integer> partial = new ArrayList<Integer>();
+		for (int i = 0; i < names.size() && i < ends.size(); i++) {
+			String name = names.get(i);
+			if (name == null || name.isEmpty()) {
+				continue;
+			}
+			String full = portNameKey(name);
+			String first = portNameKey(firstWord(name));
+			if (full.equals(wanted) || first.equals(wanted)) {
+				exact.add(Integer.valueOf(i));
+			} else if (full.startsWith(wanted) || first.startsWith(wanted)) {
+				partial.add(Integer.valueOf(i));
+			}
+		}
+		List<Integer> matches = exact.isEmpty() ? partial : exact;
+		if (matches.isEmpty()) {
+			return null;
+		}
+		if (matches.size() > 1) {
+			StringBuilder buf = new StringBuilder();
+			for (int i = 0; i < matches.size(); i++) {
+				int index = matches.get(i).intValue();
+				if (buf.length() > 0) {
+					buf.append(", ");
+				}
+				buf.append(index).append(" (").append(names.get(index)).append(")");
+			}
+			throw new McpException("'" + portText + "' matches " + matches.size() + " ports of component "
+					+ idOf(owner) + ": " + buf + "; use the port index instead, as in c3.1");
+		}
+		return ends.get(matches.get(0).intValue()).getLocation();
+	}
+
+	/** The first word of a port name, up to a space, colon or dash. */
+	private static String firstWord(String name) {
+		for (int i = 0; i < name.length(); i++) {
+			char c = name.charAt(i);
+			if (c == ' ' || c == ':' || c == '-' || c == '(') {
+				return name.substring(0, i);
+			}
+		}
+		return name;
+	}
+
+	/** Letters and digits only, lower case, for comparing a written port name with a real one. */
+	private static String portNameKey(String text) {
+		StringBuilder buf = new StringBuilder();
+		for (int i = 0; i < text.length(); i++) {
+			char c = Character.toLowerCase(text.charAt(i));
+			if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+				buf.append(c);
+			}
+		}
+		return buf.toString();
 	}
 
 	/**
@@ -1801,8 +2016,59 @@ public class McpSession implements Closeable {
 	}
 
 	/**
-	 * For a subcircuit instance, the label of the subcircuit pin behind each port, in
-	 * port index order, or null for anything else. SubcircuitFactory creates the ports
+	 * The component port nearest to a location, described in a sentence an error message can
+	 * use, or null when there is none within {@code within} units.
+	 *
+	 * <p>
+	 * This is what turns "nothing is at (222, 240)" into "the nearest port is c22.4 (Less,
+	 * output, 1 bit) at (220, 240), 2 units away" - the answer an agent needs at the moment it
+	 * has worked out a coordinate by hand instead of asking the catalogue for the real one.
+	 * Distances are Manhattan, in the same units as the grid, so the number it prints is the
+	 * number of pixels the agent has to move.
+	 * </p>
+	 */
+	public String describeNearestPort(Circuit circuit, Location want, int within) {
+		Component bestComponent = null;
+		EndData bestEnd = null;
+		int bestIndex = -1;
+		int bestDistance = 0;
+		for (Component comp : circuit.getNonWires()) {
+			java.util.List<EndData> ends = comp.getEnds();
+			for (int i = 0; i < ends.size(); i++) {
+				EndData end = ends.get(i);
+				if (end == null) {
+					continue;
+				}
+				int distance = Math.abs(end.getLocation().getX() - want.getX())
+						+ Math.abs(end.getLocation().getY() - want.getY());
+				if (distance <= within && (bestEnd == null || distance < bestDistance)) {
+					bestComponent = comp;
+					bestEnd = end;
+					bestIndex = i;
+					bestDistance = distance;
+				}
+			}
+		}
+		if (bestEnd == null) {
+			return null;
+		}
+		StringBuilder buf = new StringBuilder();
+		buf.append("the nearest port is ").append(idOf(bestComponent)).append('.').append(bestIndex)
+				.append(" at ").append(bestEnd.getLocation()).append(", ").append(bestDistance)
+				.append(bestDistance == 1 ? " unit away" : " units away");
+		java.util.List<String> names = portNames(bestComponent);
+		if (names != null && bestIndex < names.size() && names.get(bestIndex) != null
+				&& !names.get(bestIndex).isEmpty()) {
+			int width = bestEnd.getWidth().getWidth();
+			buf.append(" (").append(names.get(bestIndex)).append(", ")
+					.append(portDirection(bestComponent.getFactory(), bestIndex, bestEnd)).append(", ")
+					.append(width).append(width == 1 ? " bit" : " bits").append(')');
+		}
+		return buf.toString();
+	}
+
+	/**
+	 * For a subcircuit instance, the label of the subcircuit pin behind each port, in	 * port index order, or null for anything else. SubcircuitFactory creates the ports
 	 * in exactly this order, so the two line up.
 	 */
 	private static List<String> subcircuitPinLabels(Component comp) {
@@ -2129,6 +2395,10 @@ public class McpSession implements Closeable {
 								+ " port(s), so there is no port " + index);
 					}
 					return ends.get(index).getLocation();
+				}
+				Location named = portByName(owner, portText);
+				if (named != null) {
+					return named;
 				}
 				return subcircuitPort(owner, portText);
 			}

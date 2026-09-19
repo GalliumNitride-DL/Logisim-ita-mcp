@@ -223,8 +223,8 @@ public class McpServer {
 							+ "' is refused; the Logisim window can turn editing back on");
 				}
 				JsonElement result = target.call(new ToolContext(session, target.name(), args));
-				session.finishCall();
-				return result;
+				String hint = session.finishCall();
+				return withHint(result, hint);
 			}
 		};
 		try {
@@ -241,6 +241,32 @@ public class McpServer {
 					+ (t instanceof McpException ? t.getMessage() : McpSession.message(t)));
 			return errorResult(t);
 		}
+	}
+
+	/**
+	 * Adds a line to whatever a tool returned, for something only the session knows - such as
+	 * "the edits are in a circuit the window is not showing". An existing hint is extended
+	 * rather than replaced, because the tool's own hint is usually the more specific one.
+	 */
+	private static JsonElement withHint(JsonElement result, String hint) {
+		if (hint == null || hint.isEmpty()) {
+			return result;
+		}
+		if (result != null && result.isJsonObject()) {
+			JsonObject obj = result.getAsJsonObject();
+			if (Json.isPresent(obj, "hint")) {
+				obj.addProperty("hint", obj.get("hint").getAsString() + " " + hint);
+			} else {
+				obj.addProperty("hint", hint);
+			}
+			return obj;
+		}
+		JsonObject ret = new JsonObject();
+		ret.addProperty("hint", hint);
+		if (result != null) {
+			ret.add("result", result);
+		}
+		return ret;
 	}
 
 	private static JsonObject toolResult(JsonElement payload) {

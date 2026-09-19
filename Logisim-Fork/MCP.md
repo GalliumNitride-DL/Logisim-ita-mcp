@@ -28,9 +28,10 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Files | `logisim_file_new`, `logisim_file_open`, `logisim_file_recover`, `logisim_file_save`, `logisim_file_save_as`, `logisim_file_close`, `logisim_file_info` |
 | Discovery | `logisim_library_list`, `logisim_component_catalog` |
 | Documentation | `logisim_help` |
+| Checks | `logisim_circuit_lint` |
 | Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats`, `logisim_circuit_nets` |
 | Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
-| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status` |
+| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status`, `logisim_sim_run_vectors` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
 | Repair | `logisim_circuit_repair_wires` |
 
@@ -71,6 +72,78 @@ anchor is its centre, so a Pin at (0,0) has corners at -25) and tell the agent t
 coordinates to use instead; `logisim_wire_add` checks every point the agent wrote as
 numbers, while leaving symbolic endpoints (`"A"`, `"FA0.Cout"`) alone, since those
 name ports that already exist.
+
+### Making the answer hard to miss
+
+Agents were guessing where pins were and then blaming themselves, so the tools now answer at the
+moment of the mistake rather than only when asked:
+
+* **Every port comes back with a reference.** `logisim_component_add`, `logisim_component_catalog` and
+  `logisim_circuit_describe` report `ref` (`c22.4`) and, when a short name identifies exactly one port,
+  `ref_by_name` (`c7.Clock`). `logisim_wire_add` accepts either, so a wire endpoint never has to be
+  arithmetic: `from: "c7.clock"` works, and a name that matches two ports is refused with both listed.
+* **An endpoint that connects nothing says so, and names the nearest port**: *"an endpoint at (320,340) is
+  not a port and does not touch any wire that was already there…; the nearest port is c1.2 at (300,300), 20
+  units away (Output: the sum of the inputs (plus carry in), output, 8 bits)"*.
+* **A wire that runs through a port names the wire** (`wire c4`) and the one-line repair
+  (`logisim_wire_remove {loc: [300, 300]}`), because Logisim has already split that wire at the port and the
+  original `from`/`to` no longer describes a segment. `logisim_wire_remove` takes `loc` for exactly that
+  reason, and removes every segment through the point.
+* **An attribute the component does not have no longer loses the call.** Arithmetic and Plexers components
+  have no `label`, so a labelled batch used to fail whole. Now the component is placed and the attribute is
+  listed under `ignored_attributes`; `on_unknown_attribute: "fail"` restores the refusal.
+* **`logisim_circuit_nets {problems_only: true}`** returns only the nets that will read `x` or `e`, with a
+  count of the clean ones it left out - the whole netlist is unreadable context for a 45-component circuit.
+* **`logisim_component_add` ends with a hint** naming the `ref` it just handed out, so an agent that reads
+  only the tail of the reply still knows to wire by reference.
+
+### Checking the work before handing it over
+
+* **`logisim_circuit_lint`** is one read-only pass that reports, per finding, its kind, its
+  severity and the tool that fixes it. Severity `error` means the circuit will not behave as
+  drawn - a net with more than one driver, a net with none, a tunnel left on Logisim's default
+  label (they all join each other), a wire segment stored through a port; `warning` means it
+  works but reads against the conventions - a tunnel facing north or south, a ground or power
+  whose facing differs from the rest of the circuit, a component or wire end off the 10 pixel
+  grid, a component at a negative coordinate the user cannot see, two components drawn on top of
+  each other, a port touching nothing. `severity: "error"` narrows it. A trial circuit with a
+  north-facing tunnel, an unlabelled tunnel, a stray ground, an off-grid tunnel, two overlapping
+  pins and an undriven wire produced 14 findings, 3 of them errors, in one call.
+  *(The short-circuit check is a backstop: Logisim splits a wire at a port as it commits, so the
+  stored model usually shows a junction rather than a wire running through a port. The prevention
+  is in `logisim_wire_add`, which warns before the commit and names the wire.)*
+* **`dry_run`** on `logisim_component_add` and `logisim_wire_add` returns everything a real call
+  would - ports, refs, routed segments, wire ids, warnings - and commits nothing, so a layout can
+  be checked before it is drawn. Verified by comparing `logisim_circuit_stats` before and after: unchanged.
+* **`logisim_sim_run_vectors`** applies many vectors in one call: `{vectors: [{values: {...},
+  expect: {...}, name: "..."}]}`, with hex accepted and `include_signals: false` for a small answer.
+  Four adder vectors with one deliberately wrong expectation came back `passed: 3, failed: 1` with
+  *"cout: expected 0, read 1"* on the failing row.
+* **A splitter's `bit_ranges`** replaces thirty-two attributes with a couple: `{"0-31": 0}` sends
+  every bit to output 0 (one output, `fanout` set to 1), `{"0-3": 1, "4-7": 0}` sends the two
+  halves to two outputs. Outputs are numbered from 0 here; Logisim stores them from 1, and the
+  conversion happens in one place.
+
+### Directions Logisim itself gets wrong
+
+A few components declare a port as an input and then drive it. `Adder`'s Carry Out is one
+(`std/arith/Adder.java:90`), and it mattered: a carry net looked undriven, so an agent that had wired it
+correctly was told its circuit had no driver. `PortFixups` corrects the direction and says so
+(`direction_note`), and the netlist counts the port as a driver. Corrections are added one at a time and only
+after checking by simulation that the port really is driven - never by editing Logisim's own libraries.
+
+### Live mode: what is highlighted, and what is not
+
+A call that edits a circuit the window is **not** showing no longer replaces the selection - Logisim paints
+the selected items of one circuit over whatever is displayed, which told the user something that was not
+there. Nothing is highlighted in that case, and the reply explains it and says how to bring the circuit
+forward:
+
+> the edits are in circuit 'main', but the window is showing 'sekundär', so nothing was highlighted… Call
+> logisim_circuit_select with circuit 'main' to bring it to the front.
+
+The selection the user already had is left alone, and a call that edits the displayed circuit highlights what
+it touched exactly as before.
 
 ### Seeing the wiring through the netlist
 

@@ -86,7 +86,21 @@ public final class McpInstructions {
 			+ "the ports of a component with their names, directions and positions, and logisim_help reads "
 			+ "Logisim's own documentation, which describes what each pin does. Getting the pins wrong (an "
 			+ "enable treated as a clock, a clear treated as data) is the most common way a circuit silently "
-			+ "misbehaves.";
+			+ "misbehaves. Every port comes back with a 'ref' you can hand straight to logisim_wire_add, so there "
+			+ "is never a reason to work a port position out by hand.\n"
+			+ "\n"
+			+ "WIRING STYLE - what keeps a Logisim schematic readable, which is what the user looks at afterwards:\n"
+			+ "- Connect neighbouring components - a few segments - with real wires. Anything that travels further, "
+			+ "crosses other wiring, or has to reach several places uses TUNNELS named after the signal instead: one "
+			+ "tunnel connects to every tunnel with the same label, anywhere in the circuit, with no wire needed. "
+			+ "Mixing the two styles on one net is legal but looks wrong.\n"
+			+ "- Face things the conventional way: tunnels east or west so their label reads along the flow, ground "
+			+ "and power pointing away from the wire they feed, pins facing the wire they join. Logisim will not "
+			+ "complain about an unusual orientation; it just makes the circuit harder to read.\n"
+			+ "- Place every component before wiring, so no wire has to pass something that does not exist yet. Two "
+			+ "wires crossing is harmless. A wire that ENDS on another wire joins it, and a wire that passes through "
+			+ "a port joins that net: logisim_wire_add warns about that case and names the wire, and "
+			+ "logisim_wire_remove {loc: [x, y]} removes just that segment.";
 
 	/** Added to the instructions when the server runs inside the user's Logisim window. */
 	public static final String LIVE_SUFFIX = "\n"
@@ -237,6 +251,22 @@ public final class McpInstructions {
 					+ "tool is normally only needed to inspect a circuit or to force a repair.";
 
 
+	public static final String CIRCUIT_LINT = "Checks a circuit and reports what is wrong with it, changing nothing: a wire that runs "
+			+ "through a port (which joins two nets), a net with more than one driver or none, a port that touches no "
+			+ "wire, a tunnel with no label (they all join each other), a tunnel facing north or south, a ground or "
+			+ "power whose facing differs from the rest of the circuit, a component or wire end off the 10 pixel "
+			+ "grid, a component at a negative coordinate the user cannot see, and components drawn on top of one "
+			+ "another. Each finding is graded error (the circuit will not behave as drawn), warning (it works but "
+			+ "reads against the conventions) or info, and names the tool that fixes it. Run it after wiring and "
+			+ "before saving or handing the circuit over; 'severity' narrows the report to errors.";
+
+	public static final String SIM_RUN_VECTORS = "Applies many input vectors in one call and returns a table, which is the shape a verification "
+			+ "pass actually has. 'vectors' is a list of {values: {pin: value}, expect: {pin: value}, name: \"...\"}, "
+			+ "where 'expect' is optional: with it, each vector comes back as pass or fail and the mismatching pins "
+			+ "are named. A single test may be given as 'values' with 'expect' beside it. Values take the same forms "
+			+ "as logisim_sim_set_input, including hex such as 0xFF; pass 'include_signals: false' to keep the answer "
+			+ "small when only the expected pins matter.";
+
 	public static final String COMPONENT_ADD = "Places one component (gate, pin, flip-flop, multiplexer, memory, subcircuit, ...) at a position in "
 					+ "a circuit. Returns the new component's session id, its ports and their positions. "
 					+ "Components are not connected by placement: add wires with logisim_wire_add so that a wire "
@@ -247,7 +277,11 @@ public final class McpInstructions {
 					+ "coordinate is off the canvas and invisible to the user, and the tool refuses it - and multiples "
 					+ "of 10. A port placed "
 					+ "within 2 units of an existing wire makes Logisim split that wire into a diagonal wire, which "
-					+ "makes every further edit and every later load of the file hang until the Java heap is exhausted.";
+					+ "makes every further edit and every later load of the file hang until the Java heap is exhausted. "
+					+ "An attribute this component does not have is skipped and listed under 'ignored_attributes' - "
+					+ "'label' does not exist on Arithmetic and Plexers components - and pass "
+					+ "on_unknown_attribute: \"fail\" if you would rather be refused. The reply gives every port a 'ref' "
+					+ "that logisim_wire_add accepts, which is safer than arithmetic on coordinates.";
 
 	public static final String COMPONENT_REMOVE = "Removes a component or a single wire from a circuit. Attached wires are left in place, so they may "
 					+ "end up dangling; remove them separately with logisim_wire_remove if that is not wanted.";
@@ -277,10 +311,15 @@ public final class McpInstructions {
 					+ "whole session then hangs until the Java heap is exhausted. Let this tool route, keep coordinates "
 					+ "on the 10 pixel grid and never negative (x and y are 0 or more, since anything above or left of "
 					+ "the origin is off the user's canvas), and give an explicit steering point rather than forcing an "
-					+ "alignment that the router refuses.";
+					+ "alignment that the router refuses. A start or end that touches no port and no wire is reported back "
+					+ "with the nearest port named, which is usually the coordinate that was meant. For anything longer than "
+					+ "a couple of segments, or shared by several components, use a tunnel rather than a long wire.";
 
 	public static final String WIRE_REMOVE = "Removes one wire segment, either by its id (as reported by logisim_circuit_describe) or by giving "
-					+ "its exact 'from' and 'to' points.";
+					+ "its exact 'from' and 'to' points, or every segment through a point with 'loc'. Use 'loc' when "
+					+ "Logisim has split a wire at a port - which is what happens after a wire has run through one by "
+					+ "mistake - because then the endpoints you wrote no longer describe a real segment and only the "
+					+ "point still identifies it.";
 
 	public static final String FILE_NEW = "Starts a new, empty Logisim project in memory, with a single circuit called 'main' and the "
 					+ "standard component libraries available. Nothing is written to disk until logisim_file_save "

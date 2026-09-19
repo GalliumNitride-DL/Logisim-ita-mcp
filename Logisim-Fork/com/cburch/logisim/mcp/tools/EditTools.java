@@ -63,6 +63,12 @@ public final class EditTools {
 						.opt("attributes", Schemas.freeObject("Any further attributes by name, exactly as reported by "
 								+ "logisim_component_catalog, e.g. {\"output\": true} for an output Pin or "
 								+ "{\"trigger\": \"falling\"}"))
+						.opt("on_unknown_attribute", Schemas.stringEnum("What to do when an attribute does not exist on "
+								+ "this component, which is common for 'label' (Arithmetic and Plexers components have "
+								+ "none): 'warn' places the component anyway and lists the attribute under "
+								+ "ignored_attributes, 'fail' refuses the whole call", "warn", "fail"))
+						.opt("dry_run", Schemas.bool("Validate and report, but place nothing: the same ports, warnings "
+								+ "and errors come back, and the circuit is left untouched"))
 						.opt("circuit", Schemas.string("Circuit to add into; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -71,24 +77,45 @@ public final class EditTools {
 				session.requireHealthyWires(circuit);
 				ComponentFactory factory = session.factoryFor(ctx.optString("lib", null), ctx.requireString("type"));
 				AttributeSet attrs = factory.createAttributeSet();
+				boolean lenient = !"fail".equalsIgnoreCase(ctx.optString("on_unknown_attribute", "warn"));
+				boolean dryRun = ctx.optBool("dry_run", false);
+				List<String> ignored = new ArrayList<String>();
 
 				JsonObject extra = ctx.optObject("attributes");
+				JsonElement ranges = extra == null ? null : extra.get("bit_ranges");
+				if (ranges != null && ranges.isJsonObject()) {
+					expandBitRanges(session, attrs, factory, ranges.getAsJsonObject(), ignored, lenient);
+					extra.remove("bit_ranges");
+				}
 				if (extra != null) {
 					for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
-						applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue());
+						String ignoredName = applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue(),
+								lenient);
+						if (ignoredName != null) {
+							ignored.add(ignoredName);
+						}
 					}
 				}
 				if (ctx.has("label")) {
-					applyAttribute(session, attrs, factory, StdAttr.LABEL.getName(),
-							new JsonPrimitive(ctx.requireString("label")));
+					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.LABEL.getName(),
+							new JsonPrimitive(ctx.requireString("label")), lenient);
+					if (ignoredName != null) {
+						ignored.add("label (this component has no label)");
+					}
 				}
 				if (ctx.has("facing")) {
-					applyAttribute(session, attrs, factory, StdAttr.FACING.getName(),
-							new JsonPrimitive(ctx.requireString("facing")));
+					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.FACING.getName(),
+							new JsonPrimitive(ctx.requireString("facing")), lenient);
+					if (ignoredName != null) {
+						ignored.add("facing (this component has a fixed orientation)");
+					}
 				}
 				if (ctx.has("width")) {
-					applyAttribute(session, attrs, factory, StdAttr.WIDTH.getName(),
-							new JsonPrimitive(Integer.valueOf(ctx.requireInt("width"))));
+					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.WIDTH.getName(),
+							new JsonPrimitive(Integer.valueOf(ctx.requireInt("width"))), lenient);
+					if (ignoredName != null) {
+						ignored.add("width (this component has a fixed width)");
+					}
 				}
 
 				Location loc = Location.create(ctx.requireInt("x"), ctx.requireInt("y"));
@@ -96,8 +123,10 @@ public final class EditTools {
 				requireOnCanvas(component, "the position of the new " + factory.getName());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				mutation.add(component);
-				session.commit(mutation, "add " + factory.getName());
-				session.noteTouched(component);
+				if (!dryRun) {
+					session.commit(mutation, "add " + factory.getName());
+					session.noteTouched(component);
+				}
 
 				JsonObject ret = session.describeComponent(component, true, true);
 				ret.addProperty("circuit", circuit.getName());
@@ -110,19 +139,100 @@ public final class EditTools {
 				if (warnings.size() > 0) {
 					ret.add("warnings", warnings);
 				}
+				if (ignored.size() > 0) {
+					JsonArray ignoredArray = new JsonArray();
+					for (String name : ignored) {
+						ignoredArray.add(name);
+					}
+					ret.add("ignored_attributes", ignoredArray);
+					ret.addProperty("ignored_note", "these attributes do not exist on a " + factory.getName()
+							+ " and were skipped; the component was placed without them. Pass "
+							+ "on_unknown_attribute: \"fail\" to be refused instead");
+				}
+				ret.addProperty("hint", "the ports above are authoritative: wire to their 'ref' (for example "
+						+ session.idOf(component) + ".0) or 'ref_by_name' instead of working out coordinates");
+				if (dryRun) {
+					ret.addProperty("dry_run", Boolean.TRUE);
+					ret.addProperty("dry_run_note", "nothing was changed: this is what the call would place, with the same "
+							+ "ports and warnings. Drop dry_run to do it");
+				}
 				return ret;
 			}
 		};
+	}
+
+	/** True when a point lies on an axis aligned segment, end points included. */
+	private static boolean onSegment(Location from, Location to, Location point) {
+		int x0 = from.getX();
+		int y0 = from.getY();
+		int x1 = to.getX();
+		int y1 = to.getY();
+		int px = point.getX();
+		int py = point.getY();
+		if (x0 == x1) {
+			return px == x0 && py >= Math.min(y0, y1) && py <= Math.max(y0, y1);
+		}
+		if (y0 == y1) {
+			return py == y0 && px >= Math.min(x0, x1) && px <= Math.max(x0, x1);
+		}
+		return false;
+	}
+
+	/**
+	 * Warns when a path's start or end touches neither a port nor a wire, and names the port
+	 * it probably meant. An endpoint that connects nothing is not an error - people do draw
+	 * stubs - but it is the signature of a guessed coordinate, so it is worth a sentence.
+	 */
+	private static void countEndpoint(Map<Location, Integer> counts, Location loc) {
+		Integer seen = counts.get(loc);
+		counts.put(loc, Integer.valueOf(seen == null ? 1 : seen.intValue() + 1));
+	}
+
+	/**
+	 * Warns when an endpoint of a path touches neither a port nor a wire that already
+	 * existed, and names the port it most likely meant. A stub is not an error - people draw
+	 * them - but it is the signature of a coordinate worked out by hand, and the nearest port
+	 * is nearly always the one that was wanted.
+	 */
+	private static void warnIfConnectsNothing(McpSession session, Circuit circuit, java.util.Set<Location> ports,
+			List<Wire> wiresBefore, Location loc, JsonArray warnings, boolean sharedWithinCall) {
+		if (sharedWithinCall || ports.contains(loc)) {
+			return;
+		}
+		for (Wire wire : wiresBefore) {
+			if (onSegment(wire.getEnd0(), wire.getEnd1(), loc)) {
+				return;
+			}
+		}
+		String near = session.describeNearestPort(circuit, loc, 30);
+		warnings.add("an endpoint at " + loc + " is not a port and does not touch any wire that was already there, so "
+				+ "it connects nothing" + (near == null ? "" : "; " + near));
 	}
 
 	/** True when nothing about a segment would connect two unintended nets. */
 	static boolean isClear(Location from, Location to, java.util.Set<Location> ports) {
 		return portInside(from, to, ports) == null;
 	}
-	private static void applyAttribute(McpSession session, AttributeSet attrs, ComponentFactory factory, String name,
-			JsonElement value) {
+	/**
+	 * Applies one attribute, or - with {@code lenient} - reports that it does not exist.
+	 *
+	 * <p>
+	 * Components in the Arithmetic and Plexers libraries have no 'label' attribute, so an
+	 * agent that labels everything it places, which is good practice, used to lose the whole
+	 * call over it: the component was not placed at all. With {@code lenient} the attribute is
+	 * skipped and the caller lists it under {@code ignored_attributes}, so nothing is dropped
+	 * silently and a misspelt name is still visible in the reply.
+	 * </p>
+	 *
+	 * @return the name of an attribute that was not applied, or null when it was applied
+	 */
+	private static String applyAttribute(McpSession session, AttributeSet attrs, ComponentFactory factory, String name,
+			JsonElement value, boolean lenient) {
 		Attribute<?> attribute = attrs.getAttribute(name);
 		if (attribute == null) {
+			if (lenient) {
+				return name;
+			}
 			throw new McpException("a " + factory.getName() + " has no attribute '" + name + "'; its attributes are: "
 					+ CatalogTools.attributeNames(attrs));
 		}
@@ -130,6 +240,78 @@ public final class EditTools {
 			throw new McpException("attribute '" + name + "' of a " + factory.getName() + " is read only");
 		}
 		setValue(attrs, attribute, session.attributeFromJson(attrs, attribute, value));
+		return null;
+	}
+
+	/**
+	 * Expands a splitter's 'bit_ranges' shorthand into the per-bit attributes Logisim stores, and
+	 * sets the input width and fan out to match.
+	 *
+	 * <p>
+	 * {"0-4": 1, "5-31": 0} takes 32 bits in, sends bits 0 to 4 to output 1 and bits 5 to 31 to
+	 * output 0 - two attributes instead of the thirty-two a caller would otherwise need. Outputs
+	 * are numbered from 0 in the shorthand; Logisim stores them from 1, and this is the one place
+	 * that converts. The width is applied first, because the per-bit attributes only exist up to
+	 * the input width.
+	 * </p>
+	 */
+	private static void expandBitRanges(McpSession session, AttributeSet attrs, ComponentFactory factory,
+			JsonObject ranges, List<String> ignored, boolean lenient) {
+		if (attrs.getAttribute("bit0") == null) {
+			ignored.add("bit_ranges (this component has no per-bit attributes; only a splitter does)");
+			return;
+		}
+		java.util.TreeMap<Integer, Integer> bits = new java.util.TreeMap<Integer, Integer>();
+		for (Map.Entry<String, JsonElement> entry : ranges.entrySet()) {
+			String key = entry.getKey().trim();
+			int dash = key.indexOf('-');
+			int from;
+			int to;
+			int value;
+			try {
+				value = entry.getValue().getAsInt();
+				if (dash < 0) {
+					from = Integer.parseInt(key);
+					to = from;
+				} else {
+					from = Integer.parseInt(key.substring(0, dash).trim());
+					to = Integer.parseInt(key.substring(dash + 1).trim());
+				}
+			} catch (RuntimeException e) {
+				throw new McpException("'bit_ranges' keys look like \"0-4\" or \"7\" and its values are output "
+						+ "numbers counted from 0; '" + entry.getKey() + "' does not fit that");
+			}
+			if (from < 0 || to < from || value < 0) {
+				throw new McpException("'bit_ranges' entry '" + entry.getKey() + "' is backwards or negative");
+			}
+			for (int i = from; i <= to; i++) {
+				bits.put(Integer.valueOf(i), Integer.valueOf(value));
+			}
+		}
+		if (bits.isEmpty()) {
+			return;
+		}
+		int fanout = 1;
+		for (Integer value : bits.values()) {
+			fanout = Math.max(fanout, value.intValue() + 1);
+		}
+		applyRangeAttribute(session, attrs, factory, "incoming", bits.lastKey().intValue() + 1, lenient, ignored,
+				"the input width");
+		applyRangeAttribute(session, attrs, factory, "fanout", fanout, lenient, ignored, "the fan out");
+		for (Map.Entry<Integer, Integer> entry : bits.entrySet()) {
+			applyRangeAttribute(session, attrs, factory, "bit" + entry.getKey(),
+					entry.getValue().intValue() + 1, lenient, ignored,
+					"the output for bit " + entry.getKey());
+		}
+	}
+
+	private static void applyRangeAttribute(McpSession session, AttributeSet attrs, ComponentFactory factory,
+			String name, int value, boolean lenient, List<String> ignored, String what) {
+		String skipped = applyAttribute(session, attrs, factory, name, new JsonPrimitive(Integer.valueOf(value)),
+				lenient);
+		if (skipped != null) {
+			ignored.add(skipped + " (" + what + " from bit_ranges)");
+		}
 	}
 
 	@SuppressWarnings({ "unchecked", "rawtypes" })
@@ -281,6 +463,9 @@ public final class EditTools {
 								"Several paths to draw in one call. All of them are committed as a single undoable edit, "
 										+ "which is much faster than one call per wire because Logisim repairs the whole "
 										+ "circuit's wiring on every edit"))
+						.opt("dry_run", Schemas.bool("Route and report, but draw nothing: the same segments, wire ids "
+								+ "and warnings come back and the circuit is left untouched. Worth doing before a large "
+								+ "batch, because a wire that runs through a port joins two nets"))
 						.opt("from", Schemas.any("Start point, used with 'to'"))
 						.opt("to", Schemas.any("End point, used with 'from'"))
 						.opt("circuit", Schemas.string("Circuit to modify; defaults to the current circuit"))) {
@@ -290,6 +475,7 @@ public final class EditTools {
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				session.requireHealthyWires(circuit);
 				List<List<Location>> paths = new ArrayList<List<Location>>();
+				boolean dryRun = ctx.optBool("dry_run", false);
 				JsonArray rawPaths = ctx.optArray("paths");
 				if (rawPaths != null) {
 					int index = 0;
@@ -310,6 +496,9 @@ public final class EditTools {
 
 				java.util.Set<Location> ports = session.portLocations(circuit);
 				java.util.Set<Wire> existing = new java.util.HashSet<Wire>(circuit.getWires());
+				// The wires as they are now, before this call adds any: an endpoint that only the
+				// wire we are about to draw touches is still an endpoint that connects nothing.
+				List<Wire> wiresBefore = new ArrayList<Wire>(circuit.getWires());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				JsonArray ids = new JsonArray();
 				JsonArray throughPorts = new JsonArray();
@@ -340,14 +529,32 @@ public final class EditTools {
 						created++;
 						Location blocked = portInside(a, b, ports);
 						if (blocked != null) {
-							throughPorts.add("the segment " + a + " -> " + b + " passes through the port at " + blocked
-									+ ", so the two nets are now connected");
+							throughPorts.add("the segment " + a + " -> " + b + " (wire " + session.idOf(wire)
+									+ ") passes through the port at " + blocked
+									+ ", so the two nets are now connected. Remove just that segment with "
+									+ "logisim_wire_remove {loc: [" + blocked.getX() + ", " + blocked.getY()
+									+ "]}, or undo the whole call, which is one undo step");
 						}
 					}
 				}
-				session.commit(mutation, "add wire");
-				for (Wire wire : createdWires) {
-					session.noteTouched(wire);
+				if (!dryRun) {
+					session.commit(mutation, "add wire");
+					for (Wire wire : createdWires) {
+						session.noteTouched(wire);
+					}
+				}
+				// Endpoints that connect nothing: the mistake an agent makes when it works a
+				// coordinate out by hand instead of asking for the port.
+				Map<Location, Integer> endpoints = new java.util.LinkedHashMap<Location, Integer>();
+				for (List<Location> path : paths) {
+					countEndpoint(endpoints, path.get(0));
+					if (path.size() > 1) {
+						countEndpoint(endpoints, path.get(path.size() - 1));
+					}
+				}
+				for (Map.Entry<Location, Integer> entry : endpoints.entrySet()) {
+					warnIfConnectsNothing(session, circuit, ports, wiresBefore, entry.getKey(), throughPorts,
+							entry.getValue().intValue() > 1);
 				}
 
 				JsonObject ret = new JsonObject();
@@ -355,6 +562,11 @@ public final class EditTools {
 				ret.addProperty("path_count", paths.size());
 				ret.addProperty("segments_created", created);
 				ret.add("wire_ids", ids);
+				if (dryRun) {
+					ret.addProperty("dry_run", Boolean.TRUE);
+					ret.addProperty("dry_run_note", "nothing was changed and no wire id was assigned: this is the route "
+							+ "the call would take, with the same warnings. Drop dry_run to draw it");
+				}
 				if (throughPorts.size() > 0) {
 					ret.add("warnings", throughPorts);
 				}
@@ -608,6 +820,9 @@ public final class EditTools {
 		return new AbstractTool("logisim_wire_remove", McpInstructions.WIRE_REMOVE,
 				Schemas.object()
 						.opt("wire", Schemas.componentRef("The wire to remove."))
+						.opt("loc", Schemas.any("Remove every wire segment that passes through this point. Use this "
+								+ "when Logisim has split a wire at a port and the original 'from'/'to' no longer describes "
+								+ "a real segment, which is what happens after a wire runs through a port by mistake"))
 						.opt("from", Schemas.any("Start point of the segment, used with 'to'"))
 						.opt("to", Schemas.any("End point of the segment, used with 'from'"))
 						.opt("circuit", Schemas.string("Circuit to modify; defaults to the current circuit"))) {
@@ -615,6 +830,33 @@ public final class EditTools {
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
+				if (ctx.has("loc")) {
+					Location at = ctx.session().resolvePoint(circuit, ctx.optElement("loc"));
+					List<Wire> hits = new ArrayList<Wire>();
+					for (Wire candidate : circuit.getWires()) {
+						if (onSegment(candidate.getEnd0(), candidate.getEnd1(), at)) {
+							hits.add(candidate);
+						}
+					}
+					if (hits.isEmpty()) {
+						throw new McpException("no wire of " + circuit.getName() + " passes through " + at
+								+ "; call logisim_circuit_describe to list the wires, with their ids");
+					}
+					session.requireHealthyWires(circuit);
+					CircuitMutation mutation = new CircuitMutation(circuit);
+					JsonArray removed = new JsonArray();
+					for (Wire hit : hits) {
+						mutation.remove(hit);
+						removed.add(session.idOf(hit));
+					}
+					session.commit(mutation, "remove wire at " + at);
+					JsonObject ret = new JsonObject();
+					ret.addProperty("circuit", circuit.getName());
+					ret.addProperty("loc", at.toString());
+					ret.addProperty("wires_removed", Integer.valueOf(hits.size()));
+					ret.add("wire_ids", removed);
+					return ret;
+				}
 				Wire wire = null;
 				if (ctx.has("wire")) {
 					Component component = session.requireComponent(circuit, ctx.optElement("wire"));

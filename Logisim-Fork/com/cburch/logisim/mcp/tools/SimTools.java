@@ -7,6 +7,8 @@
 
 package com.cburch.logisim.mcp.tools;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import com.cburch.logisim.circuit.Circuit;
@@ -262,6 +264,146 @@ public final class SimTools {
 				return ret;
 			}
 		};
+	}
+
+	/** Guard against a script that asks for more vectors than one session should run. */
+	private static final int MAX_VECTORS = 500;
+
+	/**
+	 * Many vectors, one call: the shape a verification pass actually has. Each vector is applied,
+	 * propagated and read before the next one, and an optional 'expect' turns the answer into
+	 * pass or fail per vector with the pins that disagreed.
+	 */
+	public static McpTool runVectors(final McpSession session) {
+		return new AbstractTool("logisim_sim_run_vectors", McpInstructions.SIM_RUN_VECTORS,
+				Schemas.object()
+						.opt("vectors", Schemas.array(Schemas.freeObject("one vector: {values: {pin: value}, "
+								+ "expect: {pin: value}, name: \"...\"}; 'expect' and 'name' are optional"),
+								"The vectors to run, in order"))
+						.opt("values", Schemas.freeObject("A single vector's inputs, as for "
+								+ "logisim_sim_set_inputs; use this instead of 'vectors' for one test"))
+						.opt("expect", Schemas.freeObject("Expected values for the pins named here, used with "
+								+ "'values'"))
+						.opt("include_signals", Schemas.bool("Include every pin's value in each row (default true; "
+								+ "false keeps only the expected pins, which is far smaller)"))
+						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
+			@Override
+			public JsonElement call(ToolContext ctx) {
+				session.requireOpen();
+				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
+				CircuitState state = session.stateFor(circuit);
+				List<JsonObject> vectors = new ArrayList<JsonObject>();
+				JsonArray given = ctx.optArray("vectors");
+				if (given != null) {
+					for (JsonElement element : given) {
+						if (!element.isJsonObject()) {
+							throw new McpException("every entry of 'vectors' must be an object with a 'values' member");
+						}
+						vectors.add(element.getAsJsonObject());
+					}
+				} else if (ctx.has("values")) {
+					JsonObject single = new JsonObject();
+					single.add("values", ctx.requireObject("values"));
+					if (ctx.has("expect")) {
+						single.add("expect", ctx.requireObject("expect"));
+					}
+					vectors.add(single);
+				} else {
+					throw new McpException("give 'vectors' (a list) or 'values' (one vector)");
+				}
+				if (vectors.size() > MAX_VECTORS) {
+					throw new McpException("'vectors' has " + vectors.size() + " entries; the maximum is "
+							+ MAX_VECTORS);
+				}
+				boolean includeSignals = ctx.optBool("include_signals", true);
+
+				JsonArray rows = new JsonArray();
+				int passed = 0;
+				int failed = 0;
+				int index = 0;
+				for (JsonObject vector : vectors) {
+					index++;
+					JsonObject row = new JsonObject();
+					row.addProperty("index", Integer.valueOf(index));
+					if (Json.isPresent(vector, "name")) {
+						row.addProperty("name", vector.get("name").getAsString());
+					}
+					JsonObject values = Json.isPresent(vector, "values") ? vector.getAsJsonObject("values") : null;
+					if (values == null) {
+						throw new McpException("vector " + index + " has no 'values' object");
+					}
+					JsonObject applied = new JsonObject();
+					for (Map.Entry<String, JsonElement> entry : values.entrySet()) {
+						Instance pin = session.inputPinByName(circuit, entry.getKey());
+						Value value = Values.parse(entry.getValue().getAsString(), widthOf(pin));
+						drivePin(state, pin, value);
+						applied.add(entry.getKey(), Values.describe(value));
+					}
+					Propagator propagator = state.getPropagator();
+					propagator.propagate();
+					row.add("applied", applied);
+
+					JsonObject expected = Json.isPresent(vector, "expect")
+							? vector.getAsJsonObject("expect") : null;
+					JsonObject observed = new JsonObject();
+					JsonArray mismatches = new JsonArray();
+					if (expected != null) {
+						for (Map.Entry<String, JsonElement> entry : expected.entrySet()) {
+							Instance pin = session.pinByName(circuit, entry.getKey());
+							if (pin == null) {
+								throw new McpException("vector " + index + " expects a pin called '" + entry.getKey()
+										+ "', which this circuit does not have");
+							}
+							Value want = Values.parse(entry.getValue().getAsString(), widthOf(pin));
+							Value got = state.getValue(pin.getLocation());
+							observed.addProperty(entry.getKey(), Values.format(got));
+							if (!want.equals(got)) {
+								mismatches.add(entry.getKey() + ": expected " + Values.format(want) + ", read "
+										+ Values.format(got));
+							}
+						}
+						row.add("observed", observed);
+						row.addProperty("pass", Boolean.valueOf(mismatches.size() == 0));
+						if (mismatches.size() == 0) {
+							passed++;
+						} else {
+							failed++;
+							row.add("mismatches", mismatches);
+						}
+					}
+					if (includeSignals) {
+						addSignals(session, circuit, row);
+					}
+					if (propagator.isOscillating()) {
+						row.addProperty("oscillating", Boolean.TRUE);
+					}
+					rows.add(row);
+				}
+
+				JsonObject ret = new JsonObject();
+				ret.addProperty("circuit", circuit.getName());
+				ret.addProperty("vector_count", Integer.valueOf(vectors.size()));
+				if (expectedGiven(vectors)) {
+					ret.addProperty("passed", Integer.valueOf(passed));
+					ret.addProperty("failed", Integer.valueOf(failed));
+				}
+				ret.add("rows", rows);
+				ret.addProperty("hint", failed > 0
+						? "the failing rows name the pins that disagreed; logisim_circuit_nets {problems_only: true} shows "
+								+ "which nets those pins sit on"
+						: "every vector that had an 'expect' matched");
+				return ret;
+			}
+		};
+	}
+
+	private static boolean expectedGiven(List<JsonObject> vectors) {
+		for (JsonObject vector : vectors) {
+			if (Json.isPresent(vector, "expect")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static McpTool status(final McpSession session) {

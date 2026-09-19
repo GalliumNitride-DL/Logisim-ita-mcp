@@ -206,8 +206,9 @@ public final class CatalogTools {
 		JsonArray ret = new JsonArray();
 		int index = 0;
 		for (com.cburch.logisim.instance.Port port : ports) {
+			final int portIndex = index++;
 			JsonObject item = new JsonObject();
-			item.addProperty("index", Integer.valueOf(index++));
+			item.addProperty("index", Integer.valueOf(portIndex));
 			String name = port.getToolTip();
 			if (name != null && !name.isEmpty()) {
 				item.addProperty("name", name);
@@ -218,7 +219,12 @@ public final class CatalogTools {
 				item.add("at", Json.array(Integer.valueOf(end.getLocation().getX()),
 						Integer.valueOf(end.getLocation().getY())));
 				item.addProperty("width", Integer.valueOf(end.getWidth().getWidth()));
-				item.addProperty("direction", McpSession.endType(end.getType()));
+				String corrected = com.cburch.logisim.mcp.PortFixups.correction(factory.getName(), portIndex);
+				item.addProperty("direction",
+						corrected != null ? corrected : McpSession.endType(end.getType()));
+				if (corrected != null) {
+					item.addProperty("direction_note", com.cburch.logisim.mcp.PortFixups.NOTE);
+				}
 			} catch (Throwable t) {
 				// a port whose width comes from an attribute that cannot be resolved here
 			}
