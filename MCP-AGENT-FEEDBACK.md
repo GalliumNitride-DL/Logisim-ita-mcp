@@ -295,34 +295,220 @@ The harness from the last session already covers most of this, and it is what ma
 
 ---
 
-## 8. Audit of the Arithmetic and Plexers libraries
+## 8. Audit of every library's port metadata
 
-Before starting P1, both libraries were checked for the kind of misleading metadata the Carry Out error
-represents. The method is cheap and repeatable: `logisim_component_catalog {lib: ..., verbose: true}` prints
-every port with its direction, width, name and position (the names come from Logisim's own tooltips, so they
-are the authority on what each port is), and any disagreement between a port's name and its declared
-direction is then verified against the source and by simulation.
+Every library in the project was checked for the kind of misleading metadata the Carry Out error
+represents: a port whose direction, width or name disagrees with what the component actually does. All eight
+libraries (Base, Gates, TTL, Wiring, Plexers, Arithmetic, Memory, I/O) and all 79 of their components,
+including the five that had not been looked at before (Memory, I/O, Gates, Wiring, TTL).
 
-**Result: one misleading port in the two libraries, the one already corrected.**
+**Method** (cheap and repeatable, one catalogue call per library): `logisim_component_catalog {verbose:
+true}` prints every port of every component with the library's own name, direction, width and position, and
+the names come from Logisim's own tooltips, so they are the authority on what each pin is. Anything that
+disagreed with its name - or looked wrong on its own - was then read in the source and, where it mattered,
+confirmed with the simulator.
 
-* Directions: every Arithmetic and Plexers port agrees with its name, except `Adder`'s `Carry Out`, which is
-declared `Port.INPUT` while the same file names it (line 95), *draws* it as "c out" (line 109) and writes it
-in `propagate` (line 135). `PortFixups` corrects it, and a simulation through the MCP now confirms it: with an
-output pin wired to that port, A=1/B=1 gives 0, A=255/B=1 gives 1, A=127/B=127 gives 0, A=128/B=128 gives 1 -
-four of four as a carry should. The wiring of that test produced no warnings, which is also the first check
-that the new endpoint diagnostic does not cry wolf on correct wiring.
-* Widths: all consistent, including the ones that look odd until you think about them - `Shifter`'s distance
-is 3 bits (log2 of an 8-bit input), `BitAdder`'s output is 4 (a count of up to 8 ones), `BitFinder`'s index
-and `PriorityEncoder`'s output are 3, `DisplayDecoder`'s input is 4 (BCD), and `Multiplier`'s carry/`Divider`'s
-upper are data-width because they carry data, not a flag.
-* Names: every port in both libraries has one, so nothing is unlabelled. Two cosmetic findings for you to
-decide on, neither of which is the MCP layer's business:
-  1. `Comparator`'s Greater port is described as *"1 if A is greator than B"* - a typo in Logisim's own
-     English bundle (`resources/logisim/en/std.properties`). One word, and it is the sort of thing an agent
-     reads verbatim.
-  2. `Adder` and `Multiplier` give both of their data inputs the *same* tooltip ("one of the numbers to
-     add"), so no name distinguishes them and `logisim_component_add` deliberately omits `ref_by_name` there;
-     the index form (`c1.0`) still works, and a label on the pin is the better name anyway.
-* Not yet audited with this method: Memory, I/O, Gates, Wiring and TTL. The method is the same (one catalogue
-call per library plus confirmation of anything suspicious), and given how clean these two were it is worth
-running once over the rest when the library work comes up.
+**Result: three defects in the libraries, four in our own reporting, and nothing else.**
+
+### 8.1 Directions: one wrong port in 79 components
+
+`Adder`'s Carry Out is the only one, and `PortFixups` corrects it (§1.1): declared `Port.INPUT` while the
+same file names it (line 95), draws it as `"c out"` (line 109) and writes it in `propagate` (line 135). With
+an output pin on that port the simulator gives 0, 1, 0, 1 for A=1/B=1, 255/1, 127/127, 128/128 - four of
+four as a carry should - and a net whose only source is that port now reports `drivers: 1`.
+
+Everywhere else the declared direction agrees with the library's own name: a flip-flop's clock is an input,
+a counter's carry an output, a RAM's data bus `input_output`; a clock, a constant, power, ground, a button,
+a dip switch, a slider, a joystick and a keyboard's data are outputs; an LED, a 7-segment display, a buzzer
+and a hex-digit display read. Three cases look wrong until you read the source, and all three are right:
+
+* a **Pin**'s port type is inverted by Logisim - an input pin's port is `Port.OUTPUT` because it drives the
+  net, an output pin's is `Port.INPUT` because it reads it. Our two views of a component *disagreed* about
+  this, which the audit found and fixed (§8.4); both now report the pin's role, so an input pin shows
+  `direction: input` beside the name "Add an input pin".
+* a **Transistor**, a **Transmission Gate** and the I/O library's **Switch** read one port and drive
+  another, by design: they are switches, not wires, and the value passes one way only - wire something into
+  a Switch's `Output` terminal and its `Input` terminal never sees it.
+* a **Tunnel** is `input_output`: it is a name rather than a device, and the netlist treats it as such.
+
+### 8.2 Widths: all consistent, but two ports have none
+
+Every width agrees with what the component does, including the ones that look odd until you think about
+them - `Shifter`'s distance is 3 bits (log2 of an 8-bit input), `BitAdder`'s output is 4 (a count of up to 8
+ones), `BitFinder`'s index and `PriorityEncoder`'s output are 3, `DisplayDecoder`'s input is 4 (BCD),
+`Multiplier`'s carry and `Divider`'s upper are data-width because they carry data rather than a flag, and
+every TTL pin is one bit.
+
+Two components have no width of their own: a **Probe** and a **Pull Resistor** declare
+`BitWidth.UNKNOWN`, which is a width of zero, and the port then takes the width of whatever it is attached
+to. The catalogue used to print `"width": 0`, which reads as "carries no bits"; it now omits the width and
+explains it in a `width_note` (§8.4).
+
+### 8.3 Names: 84 ports have none, and that is Logisim's own answer
+
+Most of the Gates library sets no port tooltips at all - `AbstractGate.java:120-126` builds
+"output, then the inputs top to bottom" with no names - and the same is true of a flip-flop's D/J/K/S/R
+inputs, a shift register's stages, a RAM's data bus (§8.5), a probe, a tunnel, a button, the dip switch
+bits, the oscilloscope's channels and the larger TTL pin lists. Nothing is invented to fill those gaps: the
+position and the direction are reported, `ref_by_name` is simply absent, and the index form (`c3.1`) always
+works.
+
+Two cosmetic findings from the earlier pass stand (both Logisim's text, not ours):
+
+1. `Comparator`'s Greater port is described as *"1 if A is greator than B"* - a typo in
+   `resources/logisim/en/std.properties`.
+2. `Adder` and `Multiplier` give both of their data inputs the *same* tooltip ("one of the numbers to
+   add"), so no name distinguishes them and `ref_by_name` is deliberately omitted there.
+
+### 8.4 Defects in our own reporting, found by the audit and fixed
+
+1. **A splitter reported no pins at all.** `Splitter` is a `ManagedComponent`, not an `InstanceFactory`, and
+   the catalogue only knew how to ask the instance library - so the one component whose entire purpose is
+   the mapping from a bus to individual bits answered nothing, and said nothing about answering nothing.
+   The catalogue now describes the component the library would build, and asks such a component for its own
+   tooltip per pin, exactly as the canvas does: a splitter reports `Combined end of splitter` (width 4) and
+   `Bit 0`/`Bit 1`/`Bit 2`/`Bit 3 from combined end`, which is the map an agent wiring a bus needs and no
+   attribute states. A placed splitter reports the same names.
+2. **The catalogue and a placed component disagreed about a Pin** (§8.1). There is now one rule
+   (`McpSession.portDirection`) and both paths call it.
+3. **`"width": 0`** became a `width_note` (§8.2).
+4. **Silence instead of an answer**: when a component's pins cannot be read at all, the catalogue says so
+   (`ports_note`), and a component that has no pins at all (a text label) says `this component has no pins`
+   rather than showing an empty list.
+
+Verified with the audit itself: all 79 components now report either a port list or a reason for not having
+one, and both the "width 0" and the "no port list" groups are empty.
+
+### 8.5 What is wrong inside Logisim, and what to do about it
+
+Three findings that are Logisim's rather than ours. None of them is fixed; the first two are yours to
+decide.
+
+1. **A RAM's data bus has no name, because of a misplaced line.** `std/memory/Ram.java:212-215`:
+
+   ```java
+   } else {
+       ps[DATA].setToolTip(Strings.getter("ramBusTip"));   // set on the old port...
+       ps[DATA] = new Port(0, 0, Port.INOUT, DATA_ATTR);   // ...which is then replaced
+   }
+   ```
+
+   The tooltip is applied to the port `configureStandardPorts` left in that slot, and the new port replaces
+   it, so `ramBusTip` never reaches a port. The combined-bus RAM is the only unnamed port in the Memory
+   library. Swapping the two statements is a one-line fix with no effect on simulation - unlike the Adder,
+   nothing reads a tooltip - but it is Logisim's file, so it was left alone.
+2. **A 7402's pins are numbered like a 7400's.** `std/ttl/Ttl7402.java:9` declares its outputs on pins 3, 6,
+   8 and 11; the real 7402 has them on pins 1, 4, 10 and 13, because it is the mirror image of the 7400 -
+   which is why the 7400 in the same library *does* use 3, 6, 8, 11. This one is not cosmetic: the simulator
+   drives exactly the pins the library declares (a NOR truth table through the tool came back 4 for 4, and
+   the netlist counts those ports as drivers), so the component works - but an agent that follows a
+   datasheet, or a schematic drawn for the real chip, wires an input into a pin this model drives. The
+   fork's own later version disagrees with this one: `master` (`ad7c02a`, the Logisim-Ita development line)
+   has
+
+   ```java
+   super("7402", (byte) 14, new byte[] { 1, 4, 10, 13 }, true);
+   ```
+
+   with the two `ttlpropagate` loops reading the other way round, so the fix already exists in the project's
+   own history - it arrived after `v2.15.0.1`, which is where this branch is based. Taking that file from
+   `master` is the honest fix; the MCP layer cannot help here, because which pins carry the value is the
+   thing that is wrong.
+3. **A Pin's port is named after the toolbar tool.** `Pin.java:361-363` sets the port's tooltip to
+   `pinInputToolTip`, the same string the tool palette shows, so hovering a pin on the canvas says *"Add an
+   input pin"* - and so does the catalogue. It is truthful (an input pin is what it is) but it reads like a
+   contradiction beside a direction, which for that port is `input`. Worth a better string in Logisim's
+   bundle one day; not worth touching now.
+
+### 8.6 What the audit did not find
+
+No other direction errors, no width inconsistencies, and no name that Logisim has and we fail to report -
+across all eight libraries. With the five audited here, every library is covered by the same method: one
+catalogue call per library, the source for anything suspicious, the simulator for anything that matters.
+
+---
+
+## 9. The second agent report — what reproduced and what did not
+
+A second agent session (a WorkBuddy agent, given the same kind of task) reported eleven issues with the
+server. Every one was put through the running server before any code was touched, because the first round's
+lesson was that a report is a list of hypotheses. The result: **three of its central claims did not
+reproduce, four items were already shipped, and four real defects came out of it** — two of which it had not
+noticed at all.
+
+### 9.1 Claims that did not reproduce
+
+| Claim | What actually happened |
+|---|---|
+| Hex input is parsed as a bit pattern: *"`0x03` on an 8-bit pin becomes three bits"* | Eleven forms tested on pins of 1, 3, 4, 8 and 32 bits — `0x03`, `0x3`, `0x00000003`, `3`, `11`, `0b11`, `"10"`, `0x0`, `0x00`, `0x0F`, `0xffffffff` — and every one parsed as the number. Malformed input (`zz`, `0x`, `3g`) is refused with a message rather than becoming 0. Our parser tested `0x` before the bit-pattern branch only when the string was *not* also a legal bit pattern, which is where a real defect was hiding (§9.2, N1) — the claim's own example was not one. |
+| Two wires that cross are joined by the tools | `net_count` stayed at **2** with a crossing in both directions; the same circuit with an endpoint *landing* on the other wire gave **1**. A crossing is not a connection in Logisim, and the report's evidence was a case where an endpoint had landed. The distinction matters, and the old diagnostic made it worse by calling that landing *"connects nothing"*. |
+| `logisim_screenshot` needs a new Java interface inside Logisim, so it cannot be a tool | No. `ComponentDrawContext`'s constructor takes a `java.awt.Component`, not a window, and `ExportImage`/`Print` in the export code already draw a whole circuit into a `BufferedImage` with no display. The tool was written in one file (`mcp/tools/ImageTools.java`) with nothing added to any original Logisim package, and its output was checked visually: the render shows pin values, labels, wires and the junction dot. |
+| Items 4, 5, 8 and 10 (batched simulation, lenient attributes, splitter `bit_ranges`, `dry_run`) | All four were already in the build it was testing — `sim_run_vectors` since the P1 round, the rest since the day before its session. A server built before those commits would explain it; nothing to change. |
+
+### 9.2 Defects it did not report, found while checking
+
+* **N1 — a `0x` literal as wide as its pin was read as a bit pattern.** A `0x`-prefixed string is a number
+  only if the digits after it are hex digits, but `isBitString` accepted `x` as an unknown bit, so `"0x0"`
+  on a three-bit pin was read as the bit pattern `0x0` (undefined, not 0) and `"0x00"` on a four-bit pin
+  became `00x0`. `Values.parse` now decides with `s.startsWith("0x") || s.startsWith("0b")` and only tries
+  the bit-string branch when the string is not a number literal, so `"0x0"` is 0 everywhere while `"x0x"`
+  is still a bit pattern with an unknown bit.
+* **N2 — an off-grid point within Logisim's two-unit tolerance was reported as connecting nothing, then
+  joined a net and poisoned the session.** `Wire.contains` accepts a location up to 2 units off a wire and
+  `WireRepair.doSplits` keeps that off-line location, so a point at `(950, 502)` beside a wire at `y=500`
+  split the wire into two segments, one of them diagonal. The transaction then went bad repeatedly and
+  `logisim_undo` failed with `OutOfMemoryError: GC overhead limit exceeded` in `WireRepair.doOverlaps` — the
+  automatic repair cannot converge on such a wire. Two changes: the endpoint diagnostic now uses
+  `Wire.contains` (Logisim's own ±2 test) instead of exact segment arithmetic, so it says *joins* rather than
+  *connects nothing*; and `requireNotInexactlyOnAWire` refuses that band outright, whatever `on_off_grid`
+  says, for wire points and for component ports alike.
+* **N3 — a circuit could be placed inside itself, and then take the session with it.** `logisim_component_add`
+  with the current circuit's own name is accepted by the edit layer, but the resulting circuit cannot be
+  simulated: the propagator recurses through the subcircuit, the call sat for 60 seconds and then died with
+  `StackOverflowError` in `CircuitState.processDirtyComponents`. Logisim's own editor refuses this (`AddTool`
+  asks `Dependencies.canAdd`); the API path did not. It does now.
+* **N4 — `logisim_circuit_select` took `name`** while every other tool takes `circuit`, so an agent that
+  learned the convention got "missing argument". It accepts both, and reports the circuit it left behind as
+  `was` — which is how an edit that landed in the wrong circuit becomes visible.
+
+### 9.3 What was implemented from the report
+
+* `logisim_wire_add` reports **`joins`**: the wire id and the net an endpoint has just become part of, with
+  that net's labels and driver count. `dry_run` reports it before the commit, and so answers "what am I about
+  to connect together?".
+* **Values are echoed as understood.** `sim_set_input`/`set_inputs` return `parsed`
+  (`{"given": "0x00000003", "understood_as": "0x00000003"}`), and every fully-known read carries `hex`, with
+  `dec` and `signed` from four bits up (`0xFFFFFFFE` → `signed: -2`). Before this, a 32-bit result was
+  thirty-two 0s and 1s and no number to compare against.
+* **`logisim_component_add_many` and `logisim_component_duplicate`**, each one mutation and one undo step.
+  A five-component placement in one call returns 543 characters of reply against roughly 3 000 for five
+  separate calls; the batch is all-or-nothing and names the index that failed.
+* **`logisim_screenshot`**, returning the PNG in the reply's image content block and, with `path`, writing it
+  to disk. It refuses a request over `max_pixels` (four megapixels by default) instead of risking the heap.
+  What it cannot show is *connection*: a crossing and a junction look the same except for the dot, so the
+  netlist remains the electrical answer and the picture is the layout answer.
+* **`compact` on the netlist** and **`terse` on the catalogue** — the two smallest of the context savings,
+  because the report's other context complaints were already addressed by `problems_only` and the
+  small-result-set gate.
+
+### 9.4 The context-cost measurements
+
+| Response | Before | After |
+|---|---|---|
+| `logisim_component_catalog` for a whole library, names only | 12 035 chars | 3 872 (`terse: true`) |
+| `logisim_circuit_nets` on an eight-net circuit | 2 120 chars | 1 150 (`compact: true`) |
+| Five components placed | ~3 000 chars, five calls, five undo steps | 543 chars, one call, one undo step |
+| A 32-bit value read | 32 bits of text, no number | the bits plus `hex`, `dec`, `signed` |
+
+The pattern the report was really describing is not that any single reply is too long, but that a *batch* of
+unrelated replies is: the fix is fewer, richer calls and an argument that says which of the two questions is
+being asked, not a shorter reply in general.
+
+### 9.5 What is left of the report
+
+Nothing on the correctness side: the three claims that did not reproduce were checked again after the
+changes, and the four defects are fixed and covered by the re-run suites. What remains is the report's one
+sound structural suggestion — a single call that proves the server is working — which is
+`logisim_self_test`, designed in full in [`MCP-PLAN.md`](MCP-PLAN.md) §5 (P1.4) and now the next item to
+build. It is the right home for the fixtures this round was tested with: the throwaway scripts under
+`%TEMP%\mcp-test` proved each behaviour once, and the value of a self test is that it proves them every time.

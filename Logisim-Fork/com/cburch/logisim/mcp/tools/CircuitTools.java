@@ -150,14 +150,25 @@ public final class CircuitTools {
 
 	public static McpTool select(final McpSession session) {
 		return new AbstractTool("logisim_circuit_select", McpInstructions.CIRCUIT_SELECT,
-				Schemas.object().req("name", Schemas.string("Name of the circuit to work on"))) {
+				Schemas.object()
+						.opt("circuit", Schemas.string("Name of the circuit to work on, as every other tool calls "
+								+ "it. 'name' is accepted as well"))
+						.opt("name", Schemas.string("The same thing, for callers that already use this spelling"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
-				Circuit circuit = session.circuitByName(ctx.requireString("name"));
+				String wanted = ctx.optString("circuit", null);
+				if (wanted == null) {
+					wanted = ctx.optString("name", null);
+				}
+				if (wanted == null) {
+					throw new McpException("give 'circuit': the name of the circuit to work on");
+				}
+				Circuit previous = session.circuit();
+				Circuit circuit = session.circuitByName(wanted);
 				session.setCircuit(circuit);
-				return Json.object("current", circuit.getName(), "component_count", circuit.getNonWires().size(),
-						"wire_count", circuit.getWires().size());
+				return Json.object("current", circuit.getName(), "was", previous.getName(), "component_count",
+						circuit.getNonWires().size(), "wire_count", circuit.getWires().size());
 			}
 		};
 	}

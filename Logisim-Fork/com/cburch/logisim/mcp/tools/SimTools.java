@@ -76,13 +76,15 @@ public final class SimTools {
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				CircuitState state = session.stateFor(circuit);
 				Instance pin = session.inputPinByName(circuit, ctx.requireString("name"));
-				Value value = Values.parse(ctx.requireString("value"), widthOf(pin));
+				String text = ctx.requireString("value");
+				Value value = Values.parse(text, widthOf(pin));
 				drivePin(state, pin, value);
 
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());
 				ret.addProperty("pin", session.pinName(pin));
 				ret.addProperty("set", Values.format(value));
+				ret.add("parsed", parsed(value, text));
 				if (ctx.optBool("propagate", true)) {
 					Propagator propagator = state.getPropagator();
 					propagator.propagate();
@@ -106,11 +108,14 @@ public final class SimTools {
 				CircuitState state = session.stateFor(circuit);
 				JsonObject requested = ctx.requireObject("values");
 				JsonArray applied = new JsonArray();
+				JsonObject understood = new JsonObject();
 				for (Map.Entry<String, JsonElement> entry : requested.entrySet()) {
 					Instance pin = session.inputPinByName(circuit, entry.getKey());
-					Value value = Values.parse(entry.getValue().getAsString(), widthOf(pin));
+					String text = entry.getValue().getAsString();
+					Value value = Values.parse(text, widthOf(pin));
 					drivePin(state, pin, value);
 					applied.add(entry.getKey());
+					understood.add(entry.getKey(), parsed(value, text));
 				}
 				Propagator propagator = state.getPropagator();
 				propagator.propagate();
@@ -118,6 +123,8 @@ public final class SimTools {
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());
 				ret.add("applied", applied);
+				ret.add("parsed", understood);
+				ret.addProperty("parsed_note", PARSED_NOTE);
 				ret.addProperty("oscillating", Boolean.valueOf(propagator.isOscillating()));
 				addSignals(session, circuit, ret);
 				return ret;
@@ -132,12 +139,16 @@ public final class SimTools {
 								"Pin labels, or locations written as \"x,y\""))
 						.opt("locs", Schemas.array(Schemas.point("a point [x, y]"),
 								"Locations to read, for example a point on an internal wire"))
+						.opt("radix", Schemas.stringEnum("Adds a 'text' field to each value, read this way: 'bin' (the "
+								+ "default) is the bit pattern the 'value' field already holds; 'hex', 'dec' and 'signed' "
+								+ "are the readings a multi-bit result needs", Values.RADIX_NAMES))
 						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				CircuitState state = session.stateFor(circuit);
+				String radix = radixOf(ctx);
 
 				JsonObject values = new JsonObject();
 				JsonArray names = ctx.optArray("names");
@@ -150,14 +161,14 @@ public final class SimTools {
 							throw new McpException("'" + name + "' is neither a pin label nor a location \"x,y\" in "
 									+ "circuit " + circuit.getName());
 						}
-						values.add(name, Values.describe(state.getValue(loc)));
+						values.add(name, Values.describe(state.getValue(loc), radix));
 					}
 				}
 				JsonArray locs = ctx.optArray("locs");
 				if (locs != null) {
 					for (JsonElement element : locs) {
 						Location loc = McpSession.parseLocation(element);
-						values.add(loc.toString(), Values.describe(state.getValue(loc)));
+						values.add(loc.toString(), Values.describe(state.getValue(loc), radix));
 					}
 				}
 				if (names == null && locs == null) {
@@ -175,19 +186,23 @@ public final class SimTools {
 
 	public static McpTool readAll(final McpSession session) {
 		return new AbstractTool("logisim_sim_read_all", McpInstructions.SIM_READ_ALL,
-				Schemas.object().opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
+				Schemas.object()
+						.opt("radix", Schemas.stringEnum("How each value should be read in the added 'text' field: "
+								+ "'bin' (default), 'hex', 'dec' or 'signed'", Values.RADIX_NAMES))
+						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				CircuitState state = session.stateFor(circuit);
+				String radix = radixOf(ctx);
 				JsonArray pins = new JsonArray();
 				for (Instance pin : session.pins(circuit)) {
 					JsonObject item = session.describePin(pin);
 					Value net = state.getValue(pin.getLocation());
 					Value driven = Pin.FACTORY.getValue(state.getInstanceState(pin));
-					item.add("net_value", Values.describe(net));
-					item.add("driven_value", Values.describe(driven));
+					item.add("net_value", Values.describe(net, radix));
+					item.add("driven_value", Values.describe(driven, radix));
 					pins.add(item);
 				}
 				JsonObject ret = new JsonObject();
@@ -286,12 +301,16 @@ public final class SimTools {
 								+ "'values'"))
 						.opt("include_signals", Schemas.bool("Include every pin's value in each row (default true; "
 								+ "false keeps only the expected pins, which is far smaller)"))
+						.opt("radix", Schemas.stringEnum("How observed values are written: 'bin' (default), 'hex', "
+								+ "'dec' or 'signed'; hex and dec make a 32-bit result readable at a glance",
+								Values.RADIX_NAMES))
 						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				CircuitState state = session.stateFor(circuit);
+				String radix = radixOf(ctx);
 				List<JsonObject> vectors = new ArrayList<JsonObject>();
 				JsonArray given = ctx.optArray("vectors");
 				if (given != null) {
@@ -337,7 +356,7 @@ public final class SimTools {
 						Instance pin = session.inputPinByName(circuit, entry.getKey());
 						Value value = Values.parse(entry.getValue().getAsString(), widthOf(pin));
 						drivePin(state, pin, value);
-						applied.add(entry.getKey(), Values.describe(value));
+						applied.add(entry.getKey(), Values.describe(value, radix));
 					}
 					Propagator propagator = state.getPropagator();
 					propagator.propagate();
@@ -356,10 +375,10 @@ public final class SimTools {
 							}
 							Value want = Values.parse(entry.getValue().getAsString(), widthOf(pin));
 							Value got = state.getValue(pin.getLocation());
-							observed.addProperty(entry.getKey(), Values.format(got));
+							observed.addProperty(entry.getKey(), read(got, radix));
 							if (!want.equals(got)) {
-								mismatches.add(entry.getKey() + ": expected " + Values.format(want) + ", read "
-										+ Values.format(got));
+								mismatches.add(entry.getKey() + ": expected " + read(want, radix) + ", read "
+										+ read(got, radix));
 							}
 						}
 						row.add("observed", observed);
@@ -445,6 +464,44 @@ public final class SimTools {
 
 	private static BitWidth widthOf(Instance pin) {		BitWidth width = pin.getAttributeValue(StdAttr.WIDTH);
 		return width == null ? BitWidth.ONE : width;
+	}
+
+	/**
+	 * What a tool call meant by one value: the number it was understood as, in hex, or the
+	 * bit pattern when some bit is not known. Echoing it is what makes a misread value
+	 * visible at the moment it is set, instead of showing up as a strange result later.
+	 */
+	private static JsonElement parsed(Value value, String given) {
+		String hex = Values.hex(value);
+		JsonObject ret = new JsonObject();
+		ret.addProperty("given", given);
+		ret.addProperty("understood_as", hex == null ? Values.format(value) : "0x" + hex);
+		return ret;
+	}
+
+	/** Said beside an echoed value, since a hex reading and a bit pattern look alike. */
+	private static final String PARSED_NOTE = "'understood_as' is how each value was read: 0x-prefixed hex when "
+			+ "every bit is known, otherwise the bit pattern (x unknown, e unknown result, z high impedance). "
+			+ "A value that does not fit the pin is refused rather than rounded";
+
+	/** The 'radix' argument, checked once so an unusable one is refused before anything runs. */
+	private static String radixOf(ToolContext ctx) {
+		String radix = ctx.optString("radix", null);
+		if (radix == null) {
+			return null;
+		}
+		for (String name : Values.RADIX_NAMES) {
+			if (name.equalsIgnoreCase(radix)) {
+				return name;
+			}
+		}
+		throw new McpException("'" + radix + "' is not a way to read a value; use bin, hex, dec or signed");
+	}
+
+	/** A value as text: the reading asked for, falling back to the bit pattern. */
+	private static String read(Value value, String radix) {
+		String text = radix == null ? null : Values.reading(value, radix);
+		return text == null ? Values.format(value) : text;
 	}
 
 	/**

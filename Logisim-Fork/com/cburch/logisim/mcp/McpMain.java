@@ -25,6 +25,7 @@ import com.cburch.logisim.mcp.tools.DocTools;
 import com.cburch.logisim.mcp.tools.EditTools;
 import com.cburch.logisim.mcp.tools.FileTools;
 import com.cburch.logisim.mcp.tools.GuiTools;
+import com.cburch.logisim.mcp.tools.ImageTools;
 import com.cburch.logisim.mcp.tools.LintTools;
 import com.cburch.logisim.mcp.tools.NetTools;
 import com.cburch.logisim.mcp.tools.SessionTools;
@@ -470,6 +471,8 @@ public final class McpMain {
 		registry.register(LintTools.lint(session));
 
 		registry.register(EditTools.addComponent(session));
+		registry.register(EditTools.addMany(session));
+		registry.register(EditTools.duplicateComponent(session));
 		registry.register(EditTools.removeComponent(session));
 		registry.register(EditTools.moveComponent(session));
 		registry.register(EditTools.setAttributes(session));
@@ -489,6 +492,7 @@ public final class McpMain {
 		registry.register(AnalyzeTools.truthTable(session));
 		registry.register(AnalyzeTools.expression(session));
 		registry.register(AnalyzeTools.buildCircuit(session));
+		registry.register(ImageTools.screenshot(session));
 		registry.register(DiagTools.repairWires(session));
 
 		registry.register(GuiTools.status(session));

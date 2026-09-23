@@ -344,7 +344,7 @@ public final class LintTools {
 	 * usually unfinished work.
 	 */
 	private static void checkNets(McpSession session, Circuit circuit, List<JsonObject> findings) {
-		JsonObject nets = session.describeNets(circuit, null, null, true, true, 1000);
+		JsonObject nets = session.describeNets(circuit, null, null, true, true, 1000, false);
 		JsonArray problems = nets.has("problems") ? nets.getAsJsonArray("problems") : null;
 		if (problems != null) {
 			for (JsonElement problem : problems) {

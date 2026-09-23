@@ -43,7 +43,150 @@ public final class EditTools {
 	/** Guard against an agent accidentally asking for an enormous construction. */
 	private static final int MAX_PATH_POINTS = 500;
 
+	/** How many components one batch call may place, copy or move. */
+	private static final int MAX_BATCH = 200;
+
+	/** How many joins one wire call describes before it summarises the rest. */
+	private static final int MAX_JOINS = 20;
+
+	/** Logisim's canvas grid, in pixels. Its own wire repair assumes it. */
+	private static final int GRID = 10;
+
+	/** What to do with a coordinate that is not on the grid. */
+	private static final int GRID_FAIL = 0;
+	private static final int GRID_WARN = 1;
+	private static final int GRID_ALLOW = 2;
+
 	private EditTools() {
+	}
+
+	/**
+	 * The 'on_off_grid' argument.
+	 *
+	 * <p>
+	 * An off-grid coordinate is how the worst damage starts: Logisim's wire repair accepts a
+	 * point up to 2 units off a wire's line, splits the wire there and keeps that off-line
+	 * location as an end, which leaves a wire whose ends differ in both x and y - and Logisim
+	 * cannot iterate such a wire, so every later edit and every attempt to load the saved
+	 * file spins until the heap is gone.
+	 * </p>
+	 *
+	 * <p>
+	 * A wire point defaults to 'fail', because a coordinate the agent wrote is one it can
+	 * correct immediately. A component position defaults to 'warn' in the callers that place
+	 * things, because there are legitimate reasons to sit off the grid and the damage only
+	 * happens when a port lands near existing wiring.
+	 * </p>
+	 */
+	private static int gridPolicy(ToolContext ctx, int fallback) {
+		String mode = ctx.optString("on_off_grid", null);
+		if (mode == null) {
+			return fallback;
+		}
+		if ("fail".equalsIgnoreCase(mode)) {
+			return GRID_FAIL;
+		}
+		if ("warn".equalsIgnoreCase(mode)) {
+			return GRID_WARN;
+		}
+		if ("allow".equalsIgnoreCase(mode) || "ignore".equalsIgnoreCase(mode)) {
+			return GRID_ALLOW;
+		}
+		throw new McpException("'on_off_grid' is 'fail', 'warn' or 'allow'; '" + mode + "' does not fit that");
+	}
+
+	private static boolean onGrid(int value) {
+		return value % GRID == 0;
+	}
+
+	private static int nearestGrid(int value) {
+		return Math.round(value / (float) GRID) * GRID;
+	}
+
+	/** What to say about an off-grid position, naming the grid point beside it. */
+	private static String offGridMessage(String what, Location loc) {
+		return what + " at " + loc + " is not on Logisim's " + GRID + " pixel grid. Logisim splits a wire that "
+				+ "passes within 2 units of a port and keeps the off-line point, so a coordinate like this can leave "
+				+ "a wire whose ends differ in both x and y, which Logisim cannot iterate at all; from then on the "
+				+ "circuit and the file it is saved in are unusable. Use (" + nearestGrid(loc.getX()) + ", "
+				+ nearestGrid(loc.getY()) + "), or pass on_off_grid: \"warn\" to keep this position anyway";
+	}
+
+	/** Refuses, reports or ignores an off-grid position, according to the policy. */
+	private static void applyGrid(int policy, String what, Location loc, JsonArray warnings) {
+		if (policy == GRID_ALLOW || (onGrid(loc.getX()) && onGrid(loc.getY()))) {
+			return;
+		}
+		String message = offGridMessage(what, loc);
+		if (policy == GRID_FAIL) {
+			throw new McpException(message);
+		}
+		if (warnings != null) {
+			warnings.add(message);
+		}
+	}
+
+	/**
+	 * Refuses a position that would make Logisim split a wire off its own line.
+	 *
+	 * <p>
+	 * Logisim accepts a point within 2 units of a wire's line as lying on that wire
+	 * ({@code Wire.contains}), and its wire repair splits the wire there and keeps the off-line
+	 * point as an end. The result is a wire whose ends differ in both x and y, which nothing
+	 * can iterate: from then on every edit, every undo and every attempt to load the saved
+	 * file runs until the heap is exhausted. Reproducing it took one call - a wire ending 2
+	 * units above an existing wire - and the damage survived the automatic repair, because the
+	 * next transaction split the wire again.
+	 * </p>
+	 *
+	 * <p>
+	 * So this is refused whatever {@code on_off_grid} says: the tool can see the exact geometry
+	 * that will break the file, and there is no way to put it back. The message names the wire,
+	 * because that is the thing to move or to join properly.
+	 * </p>
+	 */
+	private static void requireNotInexactlyOnAWire(Circuit circuit, Location loc, String what) {
+		if (onGrid(loc.getX()) && onGrid(loc.getY())) {
+			return;
+		}
+		for (Wire wire : circuit.getWires()) {
+			if (!wire.contains(loc) || onSegment(wire.getEnd0(), wire.getEnd1(), loc)) {
+				// not near it, or exactly on it: an exact landing point is an ordinary connection
+				continue;
+			}
+			throw new McpException(what + " at " + loc + " is off the " + GRID + " pixel grid and within 2 units "
+					+ "of the wire " + wire.getEnd0() + " -> " + wire.getEnd1() + ", but not exactly on it. Logisim "
+					+ "would split that wire here and keep this off-line point, which leaves a wire whose ends differ "
+					+ "in both x and y - nothing can iterate it, so every later edit, every undo and every attempt to "
+					+ "load the saved file runs until the Java heap is exhausted. This is refused whatever "
+					+ "on_off_grid says. Put the point on the grid (" + nearestGrid(loc.getX()) + ", "
+					+ nearestGrid(loc.getY()) + "), or move the wire it is near");
+		}
+	}
+
+	/**
+	 * Refuses to place a circuit inside itself.
+	 *
+	 * <p>
+	 * Logisim's own editor checks this when a subcircuit is dropped on the canvas - AddTool
+	 * asks Dependencies.canAdd before it puts anything down - but an edit made through the API
+	 * went straight into the circuit. A circuit that contains itself cannot be simulated: the
+	 * propagator recurses through the subcircuit until the stack overflows, the call never
+	 * returns, and the session stays unusable until the server is restarted. The check below
+	 * is Logisim's own, so this refuses exactly what the editor refuses.
+	 * </p>
+	 */
+	private static void requireNotCircular(McpSession session, Circuit circuit, ComponentFactory factory) {
+		if (!(factory instanceof com.cburch.logisim.circuit.SubcircuitFactory)) {
+			return;
+		}
+		Circuit sub = ((com.cburch.logisim.circuit.SubcircuitFactory) factory).getSubcircuit();
+		if (!session.dependencies().canAdd(circuit, sub)) {
+			throw new McpException("circuit '" + sub.getName() + "' cannot go inside circuit '" + circuit.getName()
+					+ "': it is that circuit, or it already contains it. Logisim's own editor refuses this, because "
+					+ "a circuit that contains itself cannot be simulated - the propagator recurses until the stack "
+					+ "overflows and the session hangs. Put the instance in another circuit, or draw the logic here");
+		}
 	}
 
 	public static McpTool addComponent(final McpSession session) {
@@ -67,6 +210,9 @@ public final class EditTools {
 								+ "this component, which is common for 'label' (Arithmetic and Plexers components have "
 								+ "none): 'warn' places the component anyway and lists the attribute under "
 								+ "ignored_attributes, 'fail' refuses the whole call", "warn", "fail"))
+						.opt("on_off_grid", Schemas.stringEnum("What to do when x or y is not a multiple of 10: "
+								+ "'warn' (default) places it and says so, 'fail' refuses, 'allow' says nothing",
+								"fail", "warn", "allow"))
 						.opt("dry_run", Schemas.bool("Validate and report, but place nothing: the same ports, warnings "
 								+ "and errors come back, and the circuit is left untouched"))
 						.opt("circuit", Schemas.string("Circuit to add into; defaults to the current circuit"))) {
@@ -75,62 +221,19 @@ public final class EditTools {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				session.requireHealthyWires(circuit);
-				ComponentFactory factory = session.factoryFor(ctx.optString("lib", null), ctx.requireString("type"));
-				AttributeSet attrs = factory.createAttributeSet();
-				boolean lenient = !"fail".equalsIgnoreCase(ctx.optString("on_unknown_attribute", "warn"));
 				boolean dryRun = ctx.optBool("dry_run", false);
 				List<String> ignored = new ArrayList<String>();
-
-				JsonObject extra = ctx.optObject("attributes");
-				JsonElement ranges = extra == null ? null : extra.get("bit_ranges");
-				if (ranges != null && ranges.isJsonObject()) {
-					expandBitRanges(session, attrs, factory, ranges.getAsJsonObject(), ignored, lenient);
-					extra.remove("bit_ranges");
-				}
-				if (extra != null) {
-					for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
-						String ignoredName = applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue(),
-								lenient);
-						if (ignoredName != null) {
-							ignored.add(ignoredName);
-						}
-					}
-				}
-				if (ctx.has("label")) {
-					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.LABEL.getName(),
-							new JsonPrimitive(ctx.requireString("label")), lenient);
-					if (ignoredName != null) {
-						ignored.add("label (this component has no label)");
-					}
-				}
-				if (ctx.has("facing")) {
-					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.FACING.getName(),
-							new JsonPrimitive(ctx.requireString("facing")), lenient);
-					if (ignoredName != null) {
-						ignored.add("facing (this component has a fixed orientation)");
-					}
-				}
-				if (ctx.has("width")) {
-					String ignoredName = applyAttribute(session, attrs, factory, StdAttr.WIDTH.getName(),
-							new JsonPrimitive(Integer.valueOf(ctx.requireInt("width"))), lenient);
-					if (ignoredName != null) {
-						ignored.add("width (this component has a fixed width)");
-					}
-				}
-
-				Location loc = Location.create(ctx.requireInt("x"), ctx.requireInt("y"));
-				Component component = factory.createComponent(loc, attrs);
-				requireOnCanvas(component, "the position of the new " + factory.getName());
+				JsonArray warnings = new JsonArray();
 				CircuitMutation mutation = new CircuitMutation(circuit);
-				mutation.add(component);
+				Component component = placeOne(session, circuit, mutation, ctx, ignored, warnings,
+						gridPolicy(ctx, GRID_WARN));
 				if (!dryRun) {
-					session.commit(mutation, "add " + factory.getName());
+					session.commit(mutation, "add " + component.getFactory().getName());
 					session.noteTouched(component);
 				}
 
 				JsonObject ret = session.describeComponent(component, true, true);
 				ret.addProperty("circuit", circuit.getName());
-				JsonArray warnings = new JsonArray();
 				for (EndData end : component.getEnds()) {
 					if (end != null && !circuit.isConnected(end.getLocation(), component)) {
 						warnings.add("port at " + end.getLocation() + " is not connected to anything yet");
@@ -145,7 +248,8 @@ public final class EditTools {
 						ignoredArray.add(name);
 					}
 					ret.add("ignored_attributes", ignoredArray);
-					ret.addProperty("ignored_note", "these attributes do not exist on a " + factory.getName()
+					ret.addProperty("ignored_note", "these attributes do not exist on a "
+							+ component.getFactory().getName()
 							+ " and were skipped; the component was placed without them. Pass "
 							+ "on_unknown_attribute: \"fail\" to be refused instead");
 				}
@@ -159,6 +263,334 @@ public final class EditTools {
 				return ret;
 			}
 		};
+	}
+
+	/**
+	 * Records that new wiring joins an existing net, naming the net, its labels and how many
+	 * ports drive it: the answer to "what am I about to connect together?".
+	 */
+	private static void addJoin(McpSession session, Circuit circuit, JsonArray joins, java.util.Set<String> seen,
+			Location point, Wire wire, String why) {
+		String key = point + "|" + session.idOf(wire);
+		if (!seen.add(key) || joins.size() >= MAX_JOINS) {
+			return;
+		}
+		JsonObject join = new JsonObject();
+		join.addProperty("point", point.toString());
+		join.addProperty("wire", session.idOf(wire));
+		JsonObject net = session.describeNetAt(circuit, point);
+		if (net != null) {
+			join.add("net", net);
+		}
+		join.addProperty("note", why + ", so from now on they are one net");
+		joins.add(join);
+	}
+
+	/**
+	 * Builds one component from a description - the arguments logisim_component_add takes -
+	 * and adds it to the mutation.
+	 *
+	 * <p>
+	 * The single tool and the batch tool both come through here, so a component placed in a
+	 * batch cannot behave differently from one placed on its own.
+	 * </p>
+	 *
+	 * @param ignored
+	 *            collects the names of attributes this component does not have
+	 * @param warnings
+	 *            collects an off-grid position, and anything else worth saying at once
+	 * @return the component, already added to {@code mutation} (nothing is committed here)
+	 */
+	private static Component placeOne(McpSession session, Circuit circuit, CircuitMutation mutation, ToolContext spec,
+			List<String> ignored, JsonArray warnings, int policy) {
+		ComponentFactory factory = session.factoryFor(spec.optString("lib", null), spec.requireString("type"));
+		AttributeSet attrs = factory.createAttributeSet();
+		boolean lenient = !"fail".equalsIgnoreCase(spec.optString("on_unknown_attribute", "warn"));
+
+		JsonObject extra = spec.optObject("attributes");
+		JsonElement ranges = extra == null ? null : extra.get("bit_ranges");
+		if (ranges != null && ranges.isJsonObject()) {
+			expandBitRanges(session, attrs, factory, ranges.getAsJsonObject(), ignored, lenient);
+			extra.remove("bit_ranges");
+		}
+		if (extra != null) {
+			for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
+				String ignoredName = applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue(), lenient);
+				if (ignoredName != null) {
+					ignored.add(ignoredName);
+				}
+			}
+		}
+		if (spec.has("label")) {
+			String ignoredName = applyAttribute(session, attrs, factory, StdAttr.LABEL.getName(),
+					new JsonPrimitive(spec.requireString("label")), lenient);
+			if (ignoredName != null) {
+				ignored.add("label (this component has no label)");
+			}
+		}
+		if (spec.has("facing")) {
+			String ignoredName = applyAttribute(session, attrs, factory, StdAttr.FACING.getName(),
+					new JsonPrimitive(spec.requireString("facing")), lenient);
+			if (ignoredName != null) {
+				ignored.add("facing (this component has a fixed orientation)");
+			}
+		}
+		if (spec.has("width")) {
+			String ignoredName = applyAttribute(session, attrs, factory, StdAttr.WIDTH.getName(),
+					new JsonPrimitive(Integer.valueOf(spec.requireInt("width"))), lenient);
+			if (ignoredName != null) {
+				ignored.add("width (this component has a fixed width)");
+			}
+		}
+
+		Location loc = Location.create(spec.requireInt("x"), spec.requireInt("y"));
+		requireNotCircular(session, circuit, factory);
+		Component component = factory.createComponent(loc, attrs);
+		requireOnCanvas(component, "the position of the new " + factory.getName());
+		applyGrid(policy, "the position of the new " + factory.getName(), loc, warnings);
+		// A port that lands within 2 units of a wire but not on it is the same hazard as an
+		// off-grid wire point: Logisim splits the wire there and leaves a diagonal behind.
+		// Only that case is refused - a port merely sitting off the grid harms nothing on its
+		// own, and some components have port offsets that are not multiples of ten.
+		int portIndex = 0;
+		for (com.cburch.logisim.comp.EndData end : component.getEnds()) {
+			if (end != null) {
+				Location port = end.getLocation();
+				requireNotInexactlyOnAWire(circuit, port,
+						"port " + portIndex + " (" + port + ") of the new " + factory.getName());
+			}
+			portIndex++;
+		}
+		mutation.add(component);
+		return component;
+	}
+
+	/**
+	 * Many components in one call, committed as one undoable edit.
+	 *
+	 * <p>
+	 * This is the component side twin of logisim_wire_add's 'paths'. A circuit of seventy
+	 * components built one call at a time costs seventy replies, each carrying a full
+	 * attribute table, a port list and a warning that its ports are not connected yet; here
+	 * the same work is one call, one undo step and one compact result.
+	 * </p>
+	 */
+	public static McpTool addMany(final McpSession session) {
+		return new AbstractTool("logisim_component_add_many", McpInstructions.COMPONENT_ADD_MANY,
+				Schemas.object()
+						.req("components", Schemas.array(Schemas.freeObject("one component: {type, x, y, lib?, label?, "
+								+ "facing?, width?, attributes?} - the arguments logisim_component_add takes, for one "
+								+ "component each"),
+								"The components to place, in order; all of them are one undoable edit"))
+						.opt("include_ports", Schemas.bool("Report each new component's ports (default true); false "
+								+ "returns just the ids, which is much smaller"))
+						.opt("on_unknown_attribute", Schemas.stringEnum("'warn' (default) skips an attribute the "
+								+ "component does not have and lists it, 'fail' refuses the call", "warn", "fail"))
+						.opt("on_off_grid", Schemas.stringEnum("'fail', 'warn' (default) or 'allow' for a component "
+								+ "whose x or y is not a multiple of 10", "fail", "warn", "allow"))
+						.opt("dry_run", Schemas.bool("Report what would be placed, and change nothing"))
+						.opt("circuit", Schemas.string("Circuit to add into; defaults to the current circuit"))) {
+			@Override
+			public JsonElement call(ToolContext ctx) {
+				session.requireOpen();
+				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
+				session.requireHealthyWires(circuit);
+				JsonArray specs = ctx.requireArray("components");
+				if (specs.size() == 0) {
+					throw new McpException("'components' is empty; give at least one component");
+				}
+				if (specs.size() > MAX_BATCH) {
+					throw new McpException("'components' has " + specs.size() + " entries; the maximum is " + MAX_BATCH
+							+ ". Split it into several calls; each one is still a single undo step");
+				}
+				boolean dryRun = ctx.optBool("dry_run", false);
+				boolean includePorts = ctx.optBool("include_ports", true);
+				int policy = gridPolicy(ctx, GRID_WARN);
+				CircuitMutation mutation = new CircuitMutation(circuit);
+				List<Component> added = new ArrayList<Component>();
+				JsonArray placed = new JsonArray();
+				int index = 0;
+				for (JsonElement element : specs) {
+					index++;
+					if (!element.isJsonObject()) {
+						throw new McpException("'components[" + (index - 1) + "]' must be an object such as "
+								+ "{\"type\": \"Tunnel\", \"x\": 300, \"y\": 90, \"label\": \"A\"}");
+					}
+					ToolContext spec = new ToolContext(session, ctx.toolName(), element.getAsJsonObject());
+					List<String> ignored = new ArrayList<String>();
+					JsonArray warnings = new JsonArray();
+					Component component;
+					try {
+						component = placeOne(session, circuit, mutation, spec, ignored, warnings, policy);
+					} catch (McpException e) {
+						throw new McpException("component " + index + " of " + specs.size() + ": " + e.getMessage());
+					}
+					added.add(component);
+					JsonObject item = new JsonObject();
+					item.addProperty("index", Integer.valueOf(index));
+					item.addProperty("id", session.idOf(component));
+					item.addProperty("type", component.getFactory().getName());
+					item.add("loc", Json.array(Integer.valueOf(component.getLocation().getX()),
+							Integer.valueOf(component.getLocation().getY())));
+					if (includePorts) {
+						item.add("ports", session.describeComponent(component, false, true).get("ports"));
+					}
+					if (ignored.size() > 0) {
+						item.add("ignored_attributes", stringArray(ignored));
+					}
+					if (warnings.size() > 0) {
+						item.add("warnings", warnings);
+					}
+					placed.add(item);
+				}
+				if (!dryRun) {
+					session.commit(mutation, "add " + added.size() + " components");
+					for (Component component : added) {
+						session.noteTouched(component);
+					}
+				}
+
+				JsonObject ret = new JsonObject();
+				ret.addProperty("circuit", circuit.getName());
+				ret.addProperty("placed_count", Integer.valueOf(added.size()));
+				ret.add("placed", placed);
+				ret.addProperty("hint", "wire to a port by its 'ref' (for example " + session.idOf(added.get(0)) + ".0). "
+						+ "Nothing is connected yet, which is why no unconnected-port warning is listed per component: "
+						+ "check the wiring with logisim_circuit_nets once it is drawn");
+				if (dryRun) {
+					ret.addProperty("dry_run", Boolean.TRUE);
+					ret.addProperty("dry_run_note", "nothing was changed and no id was assigned: this is what the "
+							+ "call would place, with the same warnings. Drop dry_run to do it");
+				}
+				return ret;
+			}
+		};
+	}
+
+	/**
+	 * Copies a component (or a wire) some number of times, each copy offset by a fixed step.
+	 *
+	 * <p>
+	 * The pattern an agent hits most is a row or a column of the same thing: a bank of tunnels,
+	 * a row of gates, a set of pins. Drawn one at a time that is one call each; this is one
+	 * call and one undo step.
+	 * </p>
+	 */
+	public static McpTool duplicateComponent(final McpSession session) {
+		return new AbstractTool("logisim_component_duplicate", McpInstructions.COMPONENT_DUPLICATE,
+				Schemas.object()
+						.req("component", Schemas.componentRef("The component or wire to copy."))
+						.req("dx", Schemas.integer("How far right of the original each copy sits"))
+						.req("dy", Schemas.integer("How far below the original each copy sits"))
+						.opt("count", Schemas.integer("How many copies to make (default 1, maximum " + MAX_BATCH + ")"))
+						.opt("attributes", Schemas.freeObject("Attributes to change on the copies, by name; the rest "
+								+ "is copied as it is. Useful for a row of tunnels, which need different labels"))
+						.opt("include_ports", Schemas.bool("Report each copy's ports (default true)"))
+						.opt("on_off_grid", Schemas.stringEnum("'fail', 'warn' (default) or 'allow' for a copy whose "
+								+ "x or y is not a multiple of 10", "fail", "warn", "allow"))
+						.opt("dry_run", Schemas.bool("Report what would be copied, and change nothing"))
+						.opt("circuit", Schemas.string("Circuit to modify; defaults to the current circuit"))) {
+			@Override
+			public JsonElement call(ToolContext ctx) {
+				session.requireOpen();
+				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
+				session.requireHealthyWires(circuit);
+				Component source = session.requireComponent(circuit, ctx.optElement("component"));
+				int dx = ctx.requireInt("dx");
+				int dy = ctx.requireInt("dy");
+				int count = ctx.optInt("count", Integer.valueOf(1)).intValue();
+				if (count < 1 || count > MAX_BATCH) {
+					throw new McpException("'count' must be between 1 and " + MAX_BATCH);
+				}
+				if (dx == 0 && dy == 0) {
+					throw new McpException("'dx' and 'dy' are both zero, so every copy would sit exactly on the "
+							+ "original and on each other");
+				}
+				boolean dryRun = ctx.optBool("dry_run", false);
+				boolean includePorts = ctx.optBool("include_ports", true);
+				int policy = gridPolicy(ctx, GRID_WARN);
+				JsonObject changes = ctx.optObject("attributes");
+				CircuitMutation mutation = new CircuitMutation(circuit);
+				JsonArray copied = new JsonArray();
+				JsonArray warnings = new JsonArray();
+				Location origin = source.getLocation();
+
+				for (int k = 1; k <= count; k++) {
+					Location loc = Location.create(origin.getX() + k * dx, origin.getY() + k * dy);
+					JsonObject item = new JsonObject();
+					item.addProperty("copy", Integer.valueOf(k));
+					item.add("loc", Json.array(Integer.valueOf(loc.getX()), Integer.valueOf(loc.getY())));
+					if (source instanceof Wire) {
+						Wire wire = (Wire) source;
+						Location a = Location.create(wire.getEnd0().getX() + k * dx, wire.getEnd0().getY() + k * dy);
+						Location b = Location.create(wire.getEnd1().getX() + k * dx, wire.getEnd1().getY() + k * dy);
+						applyGrid(policy, "copy " + k, a, warnings);
+						Wire copy = Wire.create(a, b);
+						mutation.add(copy);
+						item.addProperty("id", session.idOf(copy));
+						item.addProperty("type", "Wire");
+						copied.add(item);
+						continue;
+					}
+					ComponentFactory factory = source.getFactory();
+					requireNotCircular(session, circuit, factory);
+					AttributeSet attrs = (AttributeSet) source.getAttributeSet().clone();
+					if (changes != null) {
+						for (Map.Entry<String, JsonElement> entry : changes.entrySet()) {
+							String skipped = applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue(), true);
+							if (skipped != null) {
+								item.addProperty("attribute_skipped", skipped
+										+ " (this component has no such attribute)");
+							}
+						}
+					}
+					Component copy = factory.createComponent(loc, attrs);
+					requireOnCanvas(copy, "copy " + k + " of this " + factory.getName());
+					applyGrid(policy, "copy " + k + " of this " + factory.getName(), loc, warnings);
+					mutation.add(copy);
+					item.addProperty("id", session.idOf(copy));
+					item.addProperty("type", factory.getName());
+					if (includePorts) {
+						item.add("ports", session.describeComponent(copy, false, true).get("ports"));
+					}
+					copied.add(item);
+				}
+
+				String label = source.getAttributeSet().getValue(StdAttr.LABEL);
+				boolean relabelled = changes != null && changes.has("label");
+				if (label != null && !label.isEmpty() && !relabelled) {
+					warnings.add("every copy keeps the label \"" + label + "\". For a tunnel that is usually what "
+							+ "you want, because tunnels with the same label are one signal; for a pin or anything else "
+							+ "it means the copies are the same net, so give each one its own label with 'attributes'");
+				}
+				if (!dryRun) {
+					session.commit(mutation, "duplicate " + source.getFactory().getName());
+				}
+
+				JsonObject ret = new JsonObject();
+				ret.addProperty("circuit", circuit.getName());
+				ret.addProperty("source", session.idOf(source));
+				ret.addProperty("copied_count", Integer.valueOf(count));
+				ret.add("copied", copied);
+				if (warnings.size() > 0) {
+					ret.add("warnings", warnings);
+				}
+				if (dryRun) {
+					ret.addProperty("dry_run", Boolean.TRUE);
+					ret.addProperty("dry_run_note", "nothing was changed and no id was assigned: this is what the "
+							+ "call would copy. Drop dry_run to do it");
+				}
+				return ret;
+			}
+		};
+	}
+
+	private static JsonArray stringArray(List<String> values) {
+		JsonArray ret = new JsonArray();
+		for (String value : values) {
+			ret.add(value);
+		}
+		return ret;
 	}
 
 	/** True when a point lies on an axis aligned segment, end points included. */
@@ -200,7 +632,7 @@ public final class EditTools {
 			return;
 		}
 		for (Wire wire : wiresBefore) {
-			if (onSegment(wire.getEnd0(), wire.getEnd1(), loc)) {
+			if (wire.contains(loc)) {
 				return;
 			}
 		}
@@ -383,11 +815,17 @@ public final class EditTools {
 
 				JsonObject ret = session.describeComponent(replacement, true, true);
 				ret.addProperty("moved_from", oldLoc.toString());
+				JsonArray warnings = new JsonArray();
+				applyGrid(gridPolicy(ctx, GRID_WARN), "the new position of this " + component.getFactory().getName(),
+						Location.create(x, y), warnings);
 				if (attachedBefore > 0) {
 					ret.addProperty("detached_wire_count", attachedBefore);
-					ret.add("warning", Json.element("Logisim does not move wires with a component, so "
-							+ attachedBefore + " wire(s) that used to touch this component are now dangling. "
-							+ "Re-add them with logisim_wire_add, or check with logisim_circuit_describe."));
+					warnings.add("Logisim does not move wires with a component, so " + attachedBefore
+							+ " wire(s) that used to touch this component are now dangling. Re-add them with "
+							+ "logisim_wire_add, or check with logisim_circuit_describe.");
+				}
+				if (warnings.size() > 0) {
+					ret.add("warnings", warnings);
 				}
 				return ret;
 			}
@@ -466,6 +904,10 @@ public final class EditTools {
 						.opt("dry_run", Schemas.bool("Route and report, but draw nothing: the same segments, wire ids "
 								+ "and warnings come back and the circuit is left untouched. Worth doing before a large "
 								+ "batch, because a wire that runs through a port joins two nets"))
+						.opt("on_off_grid", Schemas.stringEnum("What to do when a point is not a multiple of 10 (the "
+								+ "grid Logisim's wire repair assumes): 'fail' (default) refuses and names the nearest "
+								+ "point, 'warn' draws it and says so, 'allow' draws it silently",
+								"fail", "warn", "allow"))
 						.opt("from", Schemas.any("Start point, used with 'to'"))
 						.opt("to", Schemas.any("End point, used with 'from'"))
 						.opt("circuit", Schemas.string("Circuit to modify; defaults to the current circuit"))) {
@@ -476,6 +918,8 @@ public final class EditTools {
 				session.requireHealthyWires(circuit);
 				List<List<Location>> paths = new ArrayList<List<Location>>();
 				boolean dryRun = ctx.optBool("dry_run", false);
+				int policy = gridPolicy(ctx, GRID_FAIL);
+				JsonArray warnings = new JsonArray();
 				JsonArray rawPaths = ctx.optArray("paths");
 				if (rawPaths != null) {
 					int index = 0;
@@ -484,14 +928,14 @@ public final class EditTools {
 							throw new McpException("'paths[" + index + "]' must be a list of points");
 						}
 						paths.add(readPoints(ctx.session(), circuit, element.getAsJsonArray(),
-								"'paths[" + index + "]'"));
+								"'paths[" + index + "]'", policy, warnings));
 						index++;
 					}
 					if (paths.isEmpty()) {
 						throw new McpException("'paths' must contain at least one path");
 					}
 				} else {
-					paths.add(readPath(ctx, circuit));
+					paths.add(readPath(ctx, circuit, policy, warnings));
 				}
 
 				java.util.Set<Location> ports = session.portLocations(circuit);
@@ -501,7 +945,6 @@ public final class EditTools {
 				List<Wire> wiresBefore = new ArrayList<Wire>(circuit.getWires());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				JsonArray ids = new JsonArray();
-				JsonArray throughPorts = new JsonArray();
 				List<Wire> createdWires = new ArrayList<Wire>();
 				int created = 0;
 
@@ -529,7 +972,7 @@ public final class EditTools {
 						created++;
 						Location blocked = portInside(a, b, ports);
 						if (blocked != null) {
-							throughPorts.add("the segment " + a + " -> " + b + " (wire " + session.idOf(wire)
+							warnings.add("the segment " + a + " -> " + b + " (wire " + session.idOf(wire)
 									+ ") passes through the port at " + blocked
 									+ ", so the two nets are now connected. Remove just that segment with "
 									+ "logisim_wire_remove {loc: [" + blocked.getX() + ", " + blocked.getY()
@@ -553,8 +996,35 @@ public final class EditTools {
 					}
 				}
 				for (Map.Entry<Location, Integer> entry : endpoints.entrySet()) {
-					warnIfConnectsNothing(session, circuit, ports, wiresBefore, entry.getKey(), throughPorts,
+					warnIfConnectsNothing(session, circuit, ports, wiresBefore, entry.getKey(), warnings,
 							entry.getValue().intValue() > 1);
+				}
+
+				// What the new wiring joins. An endpoint that lands on an existing wire - or within
+				// the 2 units Logisim's own wire test accepts - merges two nets, and so does a segment
+				// that lies along an existing wire. That is usually intended, and it is also the
+				// mistake that silently connects two things that were meant to stay apart, so each one
+				// is named together with the net it becomes part of.
+				JsonArray joins = new JsonArray();
+				java.util.Set<String> seenJoins = new java.util.HashSet<String>();
+				for (List<Location> path : paths) {
+					for (Location point : new Location[] { path.get(0), path.get(path.size() - 1) }) {
+						for (Wire wire : wiresBefore) {
+							if (wire.contains(point)) {
+								addJoin(session, circuit, joins, seenJoins, point, wire,
+										"an endpoint lands on wire " + session.idOf(wire));
+							}
+						}
+					}
+				}
+				for (Wire createdWire : createdWires) {
+					for (Wire wire : wiresBefore) {
+						if (createdWire.overlaps(wire, false)) {
+							addJoin(session, circuit, joins, seenJoins, createdWire.getEnd0(), wire,
+									"the new segment " + createdWire.getEnd0() + " -> " + createdWire.getEnd1()
+												+ " lies on wire " + session.idOf(wire));
+						}
+					}
 				}
 
 				JsonObject ret = new JsonObject();
@@ -567,39 +1037,50 @@ public final class EditTools {
 					ret.addProperty("dry_run_note", "nothing was changed and no wire id was assigned: this is the route "
 							+ "the call would take, with the same warnings. Drop dry_run to draw it");
 				}
-				if (throughPorts.size() > 0) {
-					ret.add("warnings", throughPorts);
+				if (joins.size() > 0) {
+					ret.add("joins", joins);
+					ret.addProperty("join_count", Integer.valueOf(seenJoins.size()));
+					if (seenJoins.size() > joins.size()) {
+						ret.addProperty("joins_omitted", Integer.valueOf(seenJoins.size() - joins.size()));
+					}
+					ret.addProperty("joins_note", "each entry is an existing wire the new wiring lands on or lies "
+							+ "along: after this call the two are one net. Ignore it when that is what you meant, and "
+							+ "otherwise move the point or use logisim_wire_remove");
+				}
+				if (warnings.size() > 0) {
+					ret.add("warnings", warnings);
 				}
 				return ret;
 			}
 		};
 	}
 
-	private static List<Location> readPath(ToolContext ctx, Circuit circuit) {
+	private static List<Location> readPath(ToolContext ctx, Circuit circuit, int policy, JsonArray warnings) {
 		JsonArray points = ctx.optArray("points");
 		List<Location> ret = new ArrayList<Location>();
 		if (points != null) {
-			return readPoints(ctx.session(), circuit, points, "'points'");
+			return readPoints(ctx.session(), circuit, points, "'points'", policy, warnings);
 		}
 		if (!ctx.has("from") || !ctx.has("to")) {
 			throw new McpException("give 'points' (a list of points), 'paths' (a list of such lists), or both "
 					+ "'from' and 'to'");
 		}
-		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("from"), "'from'"));
-		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("to"), "'to'"));
+		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("from"), "'from'", policy, warnings));
+		ret.add(readPoint(ctx.session(), circuit, ctx.optElement("to"), "'to'", policy, warnings));
 		if (ret.size() < 2) {
 			throw new McpException("a wire needs at least two points");
 		}
 		return ret;
 	}
 
-	private static List<Location> readPoints(McpSession session, Circuit circuit, JsonArray points, String what) {
+	private static List<Location> readPoints(McpSession session, Circuit circuit, JsonArray points, String what,
+			int policy, JsonArray warnings) {
 		if (points.size() > MAX_PATH_POINTS) {
 			throw new McpException(what + " has " + points.size() + " entries; the maximum is " + MAX_PATH_POINTS);
 		}
 		List<Location> ret = new ArrayList<Location>();
 		for (JsonElement element : points) {
-			ret.add(readPoint(session, circuit, element, what + " entry"));
+			ret.add(readPoint(session, circuit, element, what + " entry", policy, warnings));
 		}
 		if (ret.size() < 2) {
 			throw new McpException(what + " needs at least two points");
@@ -617,10 +1098,15 @@ public final class EditTools {
 	 * which is what lands work out of sight.
 	 * </p>
 	 */
-	private static Location readPoint(McpSession session, Circuit circuit, JsonElement element, String what) {
+	private static Location readPoint(McpSession session, Circuit circuit, JsonElement element, String what,
+			int policy, JsonArray warnings) {
 		Location loc = session.resolvePoint(circuit, element);
-		if (isCoordinateLiteral(element) && (loc.getX() < 0 || loc.getY() < 0)) {
-			throw new McpException(McpInstructions.negativeCoordinate(what, loc.getX(), loc.getY()));
+		if (isCoordinateLiteral(element)) {
+			if (loc.getX() < 0 || loc.getY() < 0) {
+				throw new McpException(McpInstructions.negativeCoordinate(what, loc.getX(), loc.getY()));
+			}
+			requireNotInexactlyOnAWire(circuit, loc, what);
+			applyGrid(policy, what, loc, warnings);
 		}
 		return loc;
 	}

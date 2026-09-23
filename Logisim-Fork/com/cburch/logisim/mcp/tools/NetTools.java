@@ -39,6 +39,9 @@ public final class NetTools {
 						.opt("problems_only", Schemas.bool("Only report the nets that are wrong: more than one driver "
 								+ "(reads 'e'), or nothing driving them (reads 'x'). Use this when checking a finished circuit, "
 								+ "instead of reading every net"))
+						.opt("compact", Schemas.bool("One line per net: its id, labels, drivers, size and the "
+								+ "references of its ports ('c3.1'), without a description of each port. Use this to survey a "
+								+ "whole circuit cheaply, then ask again with 'net' for the one you need"))
 						.opt("limit", Schemas.integer("Maximum number of nets to return, largest first (default 100)"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -52,11 +55,13 @@ public final class NetTools {
 				}
 				boolean includeUnconnected = ctx.optBool("include_unconnected", true);
 				boolean problemsOnly = ctx.optBool("problems_only", false);
+				boolean compact = ctx.optBool("compact", false);
 				int limit = ctx.optInt("limit", Integer.valueOf(100)).intValue();
 				if (limit <= 0) {
 					throw new com.cburch.logisim.mcp.McpException("'limit' must be greater than zero");
 				}
-				return session.describeNets(circuit, netFilter, portFilter, includeUnconnected, problemsOnly, limit);
+				return session.describeNets(circuit, netFilter, portFilter, includeUnconnected, problemsOnly, limit,
+						compact);
 			}
 		};
 	}

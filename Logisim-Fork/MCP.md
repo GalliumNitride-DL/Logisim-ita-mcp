@@ -30,9 +30,10 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Documentation | `logisim_help` |
 | Checks | `logisim_circuit_lint` |
 | Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats`, `logisim_circuit_nets` |
-| Editing | `logisim_component_add`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
+| Editing | `logisim_component_add`, `logisim_component_add_many`, `logisim_component_duplicate`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status`, `logisim_sim_run_vectors` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
+| Picture | `logisim_screenshot` |
 | Repair | `logisim_circuit_repair_wires` |
 
 Every tool returns JSON. Errors come back as `isError: true` with a message that
@@ -51,8 +52,26 @@ answer it from Logisim itself rather than from guesswork:
   position relative to the component's anchor. A `D Flip-Flop` comes back as six ports
   including `Current flip-flop state`, `Clock: state updates on trigger` and
   `Clear: When 1, pin state to 0 asynchronously`. The same names appear on the `ports`
-  of whatever `logisim_component_add` places, so a component can be checked pin by pin
-  after placing it.
+  of whatever `logisim_component_add` places, because both are read the same way, so a
+  component can be checked pin by pin after placing it. This holds for every component
+  in every library, including ones whose pins the library computes itself rather than
+  declaring on the factory: a `Splitter` reports `Combined end of splitter` (width 4)
+  and `Bit 0`…`Bit 3 from combined end`, which is the bus-to-pin map nothing else
+  states.
+
+  Two fields exist for the cases where a port cannot be described in the usual way,
+  so that neither is silently missing:
+
+  * **`width_note`** instead of `width`, for a port with no width of its own - a Probe
+    or a Pull Resistor takes the width of whatever it is attached to (printing
+    `0` would read as "carries no bits");
+  * **`ports_note`** when a component has no pins at all (a text label) or when its
+    pins cannot be read without placing it.
+
+  A port with no `name` is Logisim's own answer, not a missing one: most gates, the
+  D/J/K/S/R inputs of the flip-flops and the stages of a shift register have no tooltip
+  in Logisim at all. Position and direction are still reported, `ref_by_name` is simply
+  absent, and the index form (`c3.1`) always works.
 * **`logisim_help`** reads Logisim's manual, which the program already ships: the user
   guide and the library reference, one page per component, in plain text. With no
   arguments it lists the manual, with `query` it searches every page and returns the
@@ -61,17 +80,69 @@ answer it from Logisim itself rather than from guesswork:
   which falls back to a search because the manual's page names do not always match the
   component's). It needs no project open.
 
+### Two faults the tools refuse to create
+
+A few mistakes cannot be repaired after the fact, so they are refused rather than warned about. Both are
+cases where the tool can see the exact geometry that will break the file, and where Logisim offers no way
+back:
+
+* **A circuit cannot be placed inside itself.** Logisim's own editor refuses this too (`AddTool` asks
+  `Dependencies.canAdd`); the API path did not, and a circuit that contains itself cannot be simulated - the
+  propagator recurses through the subcircuit until the stack overflows, the call never returns and the
+  session has to be restarted. `logisim_component_add`, `logisim_component_add_many` and
+  `logisim_component_duplicate` all ask Logisim's own question first.
+* **A wire point that is off the 10 pixel grid is refused** (`on_off_grid: "warn"` to keep it anyway, or
+  `"allow"` to say nothing), and a point *within two units of an existing wire but not on it* is refused
+  whatever `on_off_grid` says. Logisim accepts such a point as lying on the wire, splits the wire there and
+  keeps the off-line location, which leaves a wire whose ends differ in both x and y - nothing can iterate
+  it, so every later edit, every undo and every attempt to load the saved file runs until the heap is
+  exhausted. An automatic repair cannot converge on it either: the next transaction splits the wire again.
+  A component *port* landing in that band is refused for the same reason, which is the one case where an
+  off-grid component position matters. `logisim_wire_remove {loc}` is deliberately left permissive, because
+  removing the bad geometry is the cure.
+
 ### Staying on the canvas
 
 Coordinates are `x >= 0, y >= 0`, in multiples of 10. Logisim's canvas starts at the
 origin and grows right and down, so anything at a negative coordinate is valid but
-off-screen - a circuit that looks empty to the user. The editing tools therefore
-refuse a negative coordinate, from either end: `logisim_component_add` and
+off-screen - a circuit that looks empty to the user. The editing tools therefore refuse a negative coordinate, from either end: `logisim_component_add` and
 `logisim_component_move` check the component's position *and* its body (a Pin's
 anchor is its centre, so a Pin at (0,0) has corners at -25) and tell the agent the
 coordinates to use instead; `logisim_wire_add` checks every point the agent wrote as
 numbers, while leaving symbolic endpoints (`"A"`, `"FA0.Cout"`) alone, since those
 name ports that already exist.
+
+### Seeing the schematic: `logisim_screenshot`
+
+A schematic is a picture, and an agent that can only read numbers is judging a design by
+text alone. `logisim_screenshot` draws a circuit and returns it as a PNG in the reply's
+image content block; with `path` it also writes the file, so the user can open it.
+
+It renders **offscreen** — the drawing code Logisim's own "Export As Image" dialog uses
+needs only a `Graphics` and a `Component`, not a window — so it works in a headless session
+as well as a live one. `region`, `scale`, `print_view` and `transparent` choose what is
+drawn, and a request larger than `max_pixels` (four megapixels by default) is refused
+rather than exhausting the heap.
+
+One thing it cannot do is tell you what is *connected*: a wire that crosses another looks
+exactly like a wire that joins it, with the difference visible only at the junction dot.
+Use `logisim_circuit_nets` for the electrical answer and the picture for the layout.
+
+### Building in bulk: `logisim_component_add_many` and `logisim_component_duplicate`
+
+One call per component is how a 70-component circuit becomes 70 replies, each with an
+attribute table, a port list and an "is not connected to anything yet" warning. Both of
+these tools exist to make that cheaper, and both commit as a **single undo step**:
+
+* `logisim_component_add_many` takes a list of the objects `logisim_component_add` takes
+  and places them in order. `include_ports: false` returns ids and positions only, and
+  `dry_run` reports what would be placed without placing it. It is all or nothing: one
+  impossible component refuses the call, with the index that failed named.
+* `logisim_component_duplicate` copies a component (or a wire) `count` times, each offset
+  by `dx`/`dy` from the previous one — a bank of tunnels or a row of gates in one call.
+  `attributes` changes the copies only, which is where a row of tunnels gets its labels;
+  the reply warns when the copies keep the original's label, because two tunnels with one
+  label are one signal.
 
 ### Making the answer hard to miss
 
@@ -94,8 +165,33 @@ moment of the mistake rather than only when asked:
   listed under `ignored_attributes`; `on_unknown_attribute: "fail"` restores the refusal.
 * **`logisim_circuit_nets {problems_only: true}`** returns only the nets that will read `x` or `e`, with a
   count of the clean ones it left out - the whole netlist is unreadable context for a 45-component circuit.
+  `compact: true` shrinks even that: one line per net, with the ports as references (`c3.1`) instead of a
+  description of each one, so a six-net circuit reports in about half the characters. Every port in the full
+  form now carries its `ref` too.
+* **A wire says which net it just joined.** An endpoint that lands on an existing wire - or within the two
+  units Logisim's own wire test accepts, which is the case that used to be described wrongly as "connects
+  nothing" - comes back under `joins` with the wire id and the net it becomes part of: *"an endpoint lands
+  on wire c9, so from now on they are one net"*, with the net's labels and driver count beside it. A segment
+  drawn along an existing wire is reported the same way. `logisim_wire_add {dry_run: true}` reports the same
+  joins before anything is drawn, so *"what am I about to connect together?"* has an answer.
+* **An input value is echoed as it was understood.** `logisim_sim_set_input` and `logisim_sim_set_inputs`
+  return `parsed`, so `{"a": "0x00000003"}` comes back as `{"given": "0x00000003", "understood_as":
+  "0x00000003"}`. A value that cannot be read is refused rather than rounded to 0, and a `0x`-prefixed
+  literal is never mistaken for a bit pattern: on a three-bit pin, `"0x0"` is the number 0, while `"x0x"`
+  is still a bit pattern with an unknown bit in it.
+* **A multi-bit read carries its numbers.** Every fully-known value comes back with `hex`, and from four
+  bits up with `dec` and `signed` (a 32-bit `0xFFFFFFFE` reports `dec: 4294967294, signed: -2`); `radix`
+  adds whichever reading you want as `text`. Before this, a 32-bit result was thirty-two 0s and 1s and no
+  number at all to compare against.
+* **The catalogue can answer cheaply.** `logisim_component_catalog {terse: true}` reports every match with
+  attribute *names* and no port detail, which is the shape of the question "does this component have a
+  label?" - an entire library in about a third of the characters `verbose` takes, and without the
+  small-result-set gate.
 * **`logisim_component_add` ends with a hint** naming the `ref` it just handed out, so an agent that reads
   only the tail of the reply still knows to wire by reference.
+* **`logisim_circuit_select` accepts `circuit`**, the argument name every other tool uses (`name` still
+  works), and reports the circuit it left under `was` - which is how an edit that landed somewhere
+  unexpected becomes visible.
 
 ### Checking the work before handing it over
 
@@ -131,6 +227,17 @@ A few components declare a port as an input and then drive it. `Adder`'s Carry O
 correctly was told its circuit had no driver. `PortFixups` corrects the direction and says so
 (`direction_note`), and the netlist counts the port as a driver. Corrections are added one at a time and only
 after checking by simulation that the port really is driven - never by editing Logisim's own libraries.
+
+Two more things the libraries themselves get wrong came out of the audit of all eight libraries
+(`MCP-AGENT-FEEDBACK.md` §8). Neither is corrected, and both are worth knowing:
+
+* **A `7402`'s pins are numbered like a `7400`'s.** The library puts its outputs on pins 3, 6, 8 and 11,
+  where the real chip has them on 1, 4, 10 and 13 (it is the mirror image of the 7400). The component
+  itself works - the ports it declares are the ports it drives - but an agent following a datasheet will
+  wire an input into a pin this model drives. Every other TTL chip in the library matches its real pinout.
+* **A `RAM`'s data bus has no name.** `std/memory/Ram.java:212-215` sets the tooltip on one port and then
+  replaces that port, so the text never reaches a port; it is the only unnamed port in the Memory library.
+  The direction, the width and the position are all reported, so the port is usable, just unnamed.
 
 ### Live mode: what is highlighted, and what is not
 
@@ -452,8 +559,11 @@ MCP view in VS Code (or any MCP client).
 Done since this list was written: **interactive mode** (item 1 — the server now runs inside
 the GUI window over HTTP, with the MCP window for the switches), **net level introspection**
 (item 2, as `logisim_circuit_nets`, built on a union-find walk rather than the package private
-bundle map, so no bridge class was needed), and **documentation** (`logisim_help`, with the
-manual packaged into the jar and the library's own port names in `logisim_component_catalog`).
+bundle map, so no bridge class was needed), **documentation** (`logisim_help`, with the
+manual packaged into the jar and the library's own port names in `logisim_component_catalog`),
+and **visualisation** (item 3, as `logisim_screenshot` — the same `ComponentDrawContext` +
+`ImageIO` route, drawn off screen with no window, which is also what the image export dialog
+uses).
 
 Still open:
 
@@ -463,9 +573,9 @@ Still open:
 2. **Memory and register tools** — `MemContents`, `Ram.loadImage` and
    `InstanceLogger` already provide everything needed to load a program image and
    dump registers, which is the heart of CPU debugging.
-3. **Visualisation** — render a circuit to PNG off screen with
-   `ComponentDrawContext` + `ImageIO` so a vision capable agent can look at the
-   schematic.
+3. **A self test** — one call that builds a known circuit, checks a truth table, a
+   batched edit, a dry run, the lint, a save/load round trip and the recover path,
+   and returns pass or fail; the design is in [`MCP-PLAN.md`](../MCP-PLAN.md) §5.
 4. **Karnaugh map rendering** — the implicants behind `logisim_analyze_expression`
    are already returned as minterm groups, which is what a K-map draws; a `grid`
    shaped view (one cell per row, per output) would make it directly readable.

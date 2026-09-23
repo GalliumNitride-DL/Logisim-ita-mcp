@@ -85,6 +85,24 @@ public class ToolContext {
 		throw failure(name, "an integer");
 	}
 
+	public Double optDouble(String name, Double fallback) {
+		if (!has(name)) {
+			return fallback;
+		}
+		JsonElement element = arguments.get(name);
+		if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
+			return Double.valueOf(element.getAsDouble());
+		}
+		if (element.isJsonPrimitive()) {
+			try {
+				return Double.valueOf(Double.parseDouble(element.getAsString().trim()));
+			} catch (NumberFormatException e) {
+				throw failure(name, "a number");
+			}
+		}
+		throw failure(name, "a number");
+	}
+
 	public boolean optBool(String name, boolean fallback) {
 		if (!has(name)) {
 			return fallback;

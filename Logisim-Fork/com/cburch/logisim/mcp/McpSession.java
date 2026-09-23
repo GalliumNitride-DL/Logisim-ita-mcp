@@ -25,6 +25,7 @@ import com.cburch.logisim.circuit.SubcircuitFactory;
 import com.cburch.logisim.circuit.Wire;
 import com.cburch.logisim.comp.Component;
 import com.cburch.logisim.comp.ComponentFactory;
+import com.cburch.logisim.comp.ComponentUserEvent;
 import com.cburch.logisim.comp.EndData;
 import com.cburch.logisim.data.Attribute;
 import com.cburch.logisim.data.AttributeOption;
@@ -47,6 +48,7 @@ import com.cburch.logisim.std.wiring.Pin;
 import com.cburch.logisim.tools.AddTool;
 import com.cburch.logisim.tools.Library;
 import com.cburch.logisim.tools.Tool;
+import com.cburch.logisim.tools.ToolTipMaker;
 import com.cburch.logisim.util.StringGetter;
 
 import com.google.gson.JsonArray;
@@ -687,6 +689,16 @@ public class McpSession implements Closeable {
 	public CircuitState state() {
 		requireOpen();
 		return stateFor(circuit());
+	}
+
+	/**
+	 * Logisim's own record of which circuit contains which. Its editor consults this before it
+	 * puts a subcircuit down, so that a circuit can never end up containing itself; the MCP
+	 * layer asks the same question before it places one.
+	 */
+	public com.cburch.logisim.proj.Dependencies dependencies() {
+		requireOpen();
+		return project.getDependencies();
 	}
 
 	/**
@@ -1415,107 +1427,16 @@ public class McpSession implements Closeable {
 	 *            report only this net, by the id a previous call returned, or null
 	 * @param portFilter
 	 *            report only the net this location belongs to, or null
+	 * @param compact
+	 *            describe each net in one line: no per-port objects, just their references
 	 */
 	public JsonObject describeNets(Circuit circuit, String netFilter, Location portFilter, boolean includeUnconnected,
-			boolean problemsOnly, int limit) {
-		indexComponents(circuit);
-		List<Wire> wires = new ArrayList<Wire>(circuit.getWires());
-		Map<Location, Location> parent = new HashMap<Location, Location>();
-
-		for (Wire wire : wires) {
-			union(parent, wire.getEnd0(), wire.getEnd1());
-		}
-		for (Wire wire : wires) {
-			Location[] ends = { wire.getEnd0(), wire.getEnd1() };
-			for (Location end : ends) {
-				for (Wire other : wires) {
-					if (!other.equals(wire) && other.contains(end)) {
-						union(parent, end, other.getEnd0());
-					}
-				}
-			}
-		}
-
-		Map<Location, NetBucket> buckets = new LinkedHashMap<Location, NetBucket>();
-		for (Wire wire : wires) {
-			bucketFor(buckets, find(parent, wire.getEnd0())).wires.add(wire);
-		}
-
-		List<PortRef> unconnected = new ArrayList<PortRef>();
-		Map<Location, List<PortRef>> withoutWire = new LinkedHashMap<Location, List<PortRef>>();
-		for (Component comp : circuit.getNonWires()) {
-			int index = 0;
-			for (EndData end : comp.getEnds()) {
-				if (end == null) {
-					index++;
-					continue;
-				}
-				Location loc = end.getLocation();
-				Location root = parent.containsKey(loc) ? find(parent, loc) : null;
-				if (root == null) {
-					// a port can also sit inside a wire whose point set has not been
-					// split since it was placed; count that as a junction
-					for (Wire wire : wires) {
-						if (wire.contains(loc)) {
-							root = find(parent, wire.getEnd0());
-							break;
-						}
-					}
-				}
-				PortRef ref = new PortRef(comp, end, index);
-				if (root == null) {
-					List<PortRef> shareHere = withoutWire.get(loc);
-					if (shareHere == null) {
-						shareHere = new ArrayList<PortRef>();
-						withoutWire.put(loc, shareHere);
-					}
-					shareHere.add(ref);
-				} else {
-					addPort(bucketFor(buckets, root), ref);
-				}
-				index++;
-			}
-		}
-		// ports that share a location are one node to Logisim even without a wire, so
-		// they are reported as a net with no wires; a port that sits alone touches
-		// nothing at all and is what makes a read come back 'x'
-		for (Map.Entry<Location, List<PortRef>> entry : withoutWire.entrySet()) {
-			List<PortRef> shareHere = entry.getValue();
-			if (shareHere.size() == 1) {
-				unconnected.add(shareHere.get(0));
-			} else {
-				NetBucket bucket = bucketFor(buckets, entry.getKey());
-				for (PortRef ref : shareHere) {
-					addPort(bucket, ref);
-				}
-				bucket.sharedLocation = true;
-			}
-		}
-
-		// the nets worth reading first are the ones with the most connections
-		List<Map.Entry<Location, NetBucket>> ordered = new ArrayList<Map.Entry<Location, NetBucket>>(
-				buckets.entrySet());
-		java.util.Collections.sort(ordered, new java.util.Comparator<Map.Entry<Location, NetBucket>>() {
-			@Override
-			public int compare(Map.Entry<Location, NetBucket> a, Map.Entry<Location, NetBucket> b) {
-				int scoreA = a.getValue().ports.size() * 1000 + a.getValue().wires.size();
-				int scoreB = b.getValue().ports.size() * 1000 + b.getValue().wires.size();
-				if (scoreA != scoreB) {
-					return scoreB - scoreA;
-				}
-				return a.getKey().compareTo(b.getKey());
-			}
-		});
-
-		// tunnel labels that appear on more than one net: Logisim joins those nets by
-		// name, without any wire, which no net walk can see
-		Map<String, Integer> tunnelNets = new HashMap<String, Integer>();
-		for (Map.Entry<Location, NetBucket> entry : ordered) {
-			for (String label : entry.getValue().tunnels) {
-				Integer seen = tunnelNets.get(label);
-				tunnelNets.put(label, Integer.valueOf(seen == null ? 1 : seen.intValue() + 1));
-			}
-		}
+			boolean problemsOnly, int limit, boolean compact) {
+		NetWalk walk = walkNets(circuit);
+		List<Wire> wires = walk.wires;
+		List<Map.Entry<Location, NetBucket>> ordered = walk.ordered;
+		List<PortRef> unconnected = walk.unconnected;
+		Map<String, Integer> tunnelNets = walk.tunnelNets;
 
 		JsonArray problems = new JsonArray();
 		JsonArray nets = new JsonArray();
@@ -1564,9 +1485,13 @@ public class McpSession implements Closeable {
 			int drivers = 0;
 			int bidirectional = 0;
 			JsonArray pins = new JsonArray();
+			JsonArray portRefs = new JsonArray();
 			for (PortRef ref : bucket.ports) {
-				JsonObject port = describePort(ref.component, ref);
-				pins.add(port);
+				if (compact) {
+					portRefs.add(portRefOf(ref));
+				} else {
+					pins.add(describePort(ref.component, ref));
+				}
 				// What drives a net is the raw end type, not the direction an agent sees:
 				// Logisim stores an input pin as OUTPUT_ONLY because inside the circuit it
 				// is the source of the wire, while an output pin only reads it.
@@ -1581,7 +1506,11 @@ public class McpSession implements Closeable {
 			if (bidirectional > 0) {
 				net.addProperty("bidirectional", bidirectional);
 			}
-			net.add("ports", pins);
+			if (compact) {
+				net.add("port_refs", portRefs);
+			} else {
+				net.add("ports", pins);
+			}
 
 			// per net notes: the two things that make a read come back 'x' or 'e'
 			JsonArray notes = new JsonArray();
@@ -1622,7 +1551,7 @@ public class McpSession implements Closeable {
 		JsonObject ret = new JsonObject();
 		ret.addProperty("circuit", circuit.getName());
 		ret.addProperty("wire_count", wires.size());
-		ret.addProperty("net_count", buckets.size());
+		ret.addProperty("net_count", walk.ordered.size());
 		ret.addProperty("nets_returned", nets.size());
 		if (truncated) {
 			ret.addProperty("truncated", Boolean.TRUE);
@@ -1635,10 +1564,14 @@ public class McpSession implements Closeable {
 		if (includeUnconnected && unconnected.size() > 0) {
 			JsonArray ports = new JsonArray();
 			for (PortRef ref : unconnected) {
-				ports.add(describePort(ref.component, ref));
+				if (compact) {
+					ports.add(portRefOf(ref));
+				} else {
+					ports.add(describePort(ref.component, ref));
+				}
 			}
 			ret.addProperty("unconnected_port_count", unconnected.size());
-			ret.add("unconnected_ports", ports);
+			ret.add(compact ? "unconnected_port_refs" : "unconnected_ports", ports);
 			problems.add(unconnected.size() + " port(s) touch no wire, so they read 'x'");
 		}
 		if (problems.size() > 0) {
@@ -1656,6 +1589,201 @@ public class McpSession implements Closeable {
 			buckets.put(root, bucket);
 		}
 		return bucket;
+	}
+
+	/**
+	 * The nets of one circuit, as the walk finds them: the wires of each net, the ports on
+	 * it, the order they are reported in, the ports that reach no wire, and the tunnel
+	 * labels that appear on more than one net.
+	 *
+	 * <p>
+	 * This exists as a class of its own because two callers need the same definition of a
+	 * net: the netlist tool, which reports all of them, and the wire tools, which have to
+	 * name the single net a new wire is about to join. Two copies of the rules would drift.
+	 * </p>
+	 */
+	private static final class NetWalk {
+		final List<Wire> wires = new ArrayList<Wire>();
+		final List<Map.Entry<Location, NetBucket>> ordered = new ArrayList<Map.Entry<Location, NetBucket>>();
+		final List<PortRef> unconnected = new ArrayList<PortRef>();
+		final Map<String, Integer> tunnelNets = new HashMap<String, Integer>();
+
+		/** The net a point lies on, or null when no wire of this circuit reaches it. */
+		NetBucket bucketAt(Location loc) {
+			for (Map.Entry<Location, NetBucket> entry : ordered) {
+				for (Wire wire : entry.getValue().wires) {
+					if (wire.contains(loc)) {
+						return entry.getValue();
+					}
+				}
+				for (PortRef ref : entry.getValue().ports) {
+					if (ref.end.getLocation().equals(loc)) {
+						return entry.getValue();
+					}
+				}
+			}
+			return null;
+		}
+	}
+
+	/**
+	 * Walks a circuit and groups its wires and ports into nets.
+	 *
+	 * <p>
+	 * Everything that calls itself "a net" here comes through this method, so the netlist
+	 * tool and the wire tools cannot disagree about what is connected to what.
+	 * </p>
+	 */
+	private NetWalk walkNets(Circuit circuit) {
+		indexComponents(circuit);
+		NetWalk ret = new NetWalk();
+		ret.wires.addAll(circuit.getWires());
+		Map<Location, Location> parent = new HashMap<Location, Location>();
+		List<Wire> wires = ret.wires;
+
+		for (Wire wire : wires) {
+			union(parent, wire.getEnd0(), wire.getEnd1());
+		}
+		for (Wire wire : wires) {
+			Location[] ends = { wire.getEnd0(), wire.getEnd1() };
+			for (Location end : ends) {
+				for (Wire other : wires) {
+					if (!other.equals(wire) && other.contains(end)) {
+						union(parent, end, other.getEnd0());
+					}
+				}
+			}
+		}
+
+		Map<Location, NetBucket> buckets = new LinkedHashMap<Location, NetBucket>();
+		for (Wire wire : wires) {
+			bucketFor(buckets, find(parent, wire.getEnd0())).wires.add(wire);
+		}
+
+		Map<Location, List<PortRef>> withoutWire = new LinkedHashMap<Location, List<PortRef>>();
+		for (Component comp : circuit.getNonWires()) {
+			int index = 0;
+			for (EndData end : comp.getEnds()) {
+				if (end == null) {
+					index++;
+					continue;
+				}
+				Location loc = end.getLocation();
+				Location root = parent.containsKey(loc) ? find(parent, loc) : null;
+				if (root == null) {
+					// a port can also sit inside a wire whose point set has not been
+					// split since it was placed; count that as a junction
+					for (Wire wire : wires) {
+						if (wire.contains(loc)) {
+							root = find(parent, wire.getEnd0());
+							break;
+						}
+					}
+				}
+				PortRef ref = new PortRef(comp, end, index);
+				if (root == null) {
+					List<PortRef> shareHere = withoutWire.get(loc);
+					if (shareHere == null) {
+						shareHere = new ArrayList<PortRef>();
+						withoutWire.put(loc, shareHere);
+					}
+					shareHere.add(ref);
+				} else {
+					addPort(bucketFor(buckets, root), ref);
+				}
+				index++;
+			}
+		}
+		// ports that share a location are one node to Logisim even without a wire, so
+		// they are reported as a net with no wires; a port that sits alone touches
+		// nothing at all and is what makes a read come back 'x'
+		for (Map.Entry<Location, List<PortRef>> entry : withoutWire.entrySet()) {
+			List<PortRef> shareHere = entry.getValue();
+			if (shareHere.size() == 1) {
+				ret.unconnected.add(shareHere.get(0));
+			} else {
+				NetBucket bucket = bucketFor(buckets, entry.getKey());
+				for (PortRef ref : shareHere) {
+					addPort(bucket, ref);
+				}
+				bucket.sharedLocation = true;
+			}
+		}
+
+		// the nets worth reading first are the ones with the most connections
+		ret.ordered.addAll(buckets.entrySet());
+		java.util.Collections.sort(ret.ordered, new java.util.Comparator<Map.Entry<Location, NetBucket>>() {
+			@Override
+			public int compare(Map.Entry<Location, NetBucket> a, Map.Entry<Location, NetBucket> b) {
+				int scoreA = a.getValue().ports.size() * 1000 + a.getValue().wires.size();
+				int scoreB = b.getValue().ports.size() * 1000 + b.getValue().wires.size();
+				if (scoreA != scoreB) {
+					return scoreB - scoreA;
+				}
+				return a.getKey().compareTo(b.getKey());
+			}
+		});
+
+		// tunnel labels that appear on more than one net: Logisim joins those nets by
+		// name, without any wire, which no net walk can see
+		for (Map.Entry<Location, NetBucket> entry : ret.ordered) {
+			for (String label : entry.getValue().tunnels) {
+				Integer seen = ret.tunnelNets.get(label);
+				ret.tunnelNets.put(label, Integer.valueOf(seen == null ? 1 : seen.intValue() + 1));
+			}
+		}
+		return ret;
+	}
+
+	/**
+	 * The net a point sits on, described the way {@link #describeNets} describes one: its
+	 * id, its labels, how many ports drive it, and how big it is. Null when the point
+	 * reaches no wire.
+	 *
+	 * <p>
+	 * This is what lets a wire tool answer "which net would this endpoint join?" before the
+	 * wire is drawn - the question an agent has to ask when it is about to connect two
+	 * things that were meant to stay apart.
+	 * </p>
+	 */
+	public JsonObject describeNetAt(Circuit circuit, Location loc) {
+		NetWalk walk = walkNets(circuit);
+		NetBucket target = walk.bucketAt(loc);
+		if (target == null) {
+			return null;
+		}
+		int index = 0;
+		for (Map.Entry<Location, NetBucket> entry : walk.ordered) {
+			index++;
+			NetBucket bucket = entry.getValue();
+			if (bucket != target) {
+				continue;
+			}
+			int length = 0;
+			for (Wire wire : bucket.wires) {
+				length += wire.getLength();
+			}
+			int drivers = 0;
+			for (PortRef ref : bucket.ports) {
+				if (PortFixups.isDriver(ref.component.getFactory().getName(), ref.index, ref.end.getType())) {
+					drivers++;
+				}
+			}
+			JsonObject ret = new JsonObject();
+			ret.addProperty("id", "n" + index);
+			ret.addProperty("wire_count", bucket.wires.size());
+			ret.addProperty("wire_length", length);
+			ret.addProperty("port_count", bucket.ports.size());
+			if (bucket.labels.size() > 0) {
+				ret.add("labels", toJsonArray(bucket.labels));
+			}
+			if (bucket.tunnels.size() > 0) {
+				ret.add("tunnel_labels", toJsonArray(bucket.tunnels));
+			}
+			ret.addProperty("drivers", drivers);
+			return ret;
+		}
+		return null;
 	}
 
 	/** Adds a port to a net and remembers its label, and a tunnel's label. */
@@ -1678,12 +1806,18 @@ public class McpSession implements Closeable {
 		return ret;
 	}
 
+	/** The reference an agent can paste into a tool call, for example "c3.1". */
+	private String portRefOf(PortRef ref) {
+		return idOf(ref.component) + "." + ref.index;
+	}
+
 	/** One port, described the same way logisim_component_add describes its ports. */
 	private JsonObject describePort(Component comp, PortRef ref) {
 		JsonObject port = new JsonObject();
 		port.addProperty("component", idOf(comp));
 		port.addProperty("type", comp.getFactory().getName());
 		port.addProperty("port", ref.index);
+		port.addProperty("ref", portRefOf(ref));
 		List<String> pinLabels = subcircuitPinLabels(comp);
 		if (pinLabels != null && ref.index < pinLabels.size() && !pinLabels.get(ref.index).isEmpty()) {
 			port.addProperty("pin", pinLabels.get(ref.index));
@@ -1783,7 +1917,7 @@ public class McpSession implements Closeable {
 				JsonObject port = new JsonObject();
 				port.addProperty("index", index);
 				port.add("loc", point(end.getLocation()));
-				port.addProperty("width", end.getWidth().getWidth());
+				addWidth(port, end.getWidth());
 				port.addProperty("direction", portDirection(comp.getFactory(), index, end));
 				if (PortFixups.isCorrected(comp.getFactory().getName(), index)) {
 					port.addProperty("direction_note", PortFixups.NOTE);
@@ -1822,7 +1956,7 @@ public class McpSession implements Closeable {
 	 * it sees on screen, so the pin's user facing role is reported instead.
 	 * </p>
 	 */
-	private static String portDirection(ComponentFactory factory, int index, EndData end) {
+	public static String portDirection(ComponentFactory factory, int index, EndData end) {
 		int type = end.getType();
 		if (factory instanceof Pin) {
 			return type == EndData.OUTPUT_ONLY ? "input" : "output";
@@ -1830,6 +1964,23 @@ public class McpSession implements Closeable {
 		String corrected = PortFixups.correction(factory.getName(), index);
 		return corrected != null ? corrected : endType(type);
 	}
+
+	/**
+	 * A port's width, or the truth about a port whose width the library leaves open: a probe
+	 * and a pull resistor declare `BitWidth.UNKNOWN`, which is zero, and a reader that takes
+	 * the number literally concludes the pin carries no bits at all.
+	 */
+	public static void addWidth(JsonObject port, BitWidth width) {
+		int bits = width == null ? 0 : width.getWidth();
+		if (bits > 0) {
+			port.addProperty("width", Integer.valueOf(bits));
+		} else {
+			port.addProperty("width_note", WIDTH_OPEN);
+		}
+	}
+
+	/** What `width_note` says where a port has no width of its own. */
+	public static final String WIDTH_OPEN = "no fixed width: this port takes the width of whatever it is attached to";
 
 	/**
 	 * A port name that can be written after a dot, or null when nothing short and unambiguous
@@ -1994,10 +2145,35 @@ public class McpSession implements Closeable {
 	 * cannot be described this way is left alone rather than described wrongly.
 	 * </p>
 	 */
-	private static List<String> portNames(Component comp) {
+	/**
+	 * The names the library gives a component's ports, in port order, or null when it has
+	 * none to give.
+	 *
+	 * <p>
+	 * The names come from the component's own ports, which the instance library computes per
+	 * instance (a flip-flop's clock is a port only once its trigger attribute is known), and
+	 * only when the count matches the component's ends, so that a component whose shape
+	 * cannot be described this way is left alone rather than described wrongly.
+	 * </p>
+	 *
+	 * <p>
+	 * A component that has no instance library to ask is asked directly, the same way the
+	 * canvas does when the pointer rests on a pin: a splitter is drawn by its own class
+	 * (`circuit/Splitter.java`) and answers with what each pin carries - "Combined value",
+	 * "Bit 3" - which is the one thing an agent wiring a bus needs to be told and the only
+	 * place it is stated at all.
+	 * </p>
+	 *
+	 * <p>
+	 * Called with a component built from a factory's default attributes, this is the catalogue's
+	 * answer for a component that has not been placed yet, and it is deliberately the same call
+	 * the placed component uses, so that the two can never disagree.
+	 * </p>
+	 */
+	public static List<String> portNames(Component comp) {
 		Instance instance = Instance.getInstanceFor(comp);
 		if (instance == null) {
-			return null;
+			return ownToolTipNames(comp);
 		}
 		List<Port> ports;
 		try {
@@ -2013,6 +2189,46 @@ public class McpSession implements Closeable {
 			ret.add(port.getToolTip());
 		}
 		return ret;
+	}
+
+	/**
+	 * The port names a component can report about itself, for the components that have no
+	 * instance library: the component's own tooltip for whichever pin the pointer is nearest,
+	 * asked once per port. Null when it answers nothing useful, so that a blank name is never
+	 * invented.
+	 */
+	private static List<String> ownToolTipNames(Component comp) {
+		Object maker = comp.getFeature(ToolTipMaker.class);
+		if (!(maker instanceof ToolTipMaker)) {
+			return null;
+		}
+		List<EndData> ends;
+		try {
+			ends = comp.getEnds();
+		} catch (Throwable t) {
+			return null;
+		}
+		if (ends == null || ends.isEmpty()) {
+			return null;
+		}
+		List<String> ret = new ArrayList<String>();
+		boolean named = false;
+		for (EndData end : ends) {
+			String name = null;
+			if (end != null && end.getLocation() != null) {
+				Location at = end.getLocation();
+				try {
+					name = ((ToolTipMaker) maker).getToolTip(new ComponentUserEvent(null, at.getX(), at.getY()));
+				} catch (Throwable t) {
+					name = null;
+				}
+			}
+			if (name != null && !name.isEmpty()) {
+				named = true;
+			}
+			ret.add(name);
+		}
+		return named ? ret : null;
 	}
 
 	/**

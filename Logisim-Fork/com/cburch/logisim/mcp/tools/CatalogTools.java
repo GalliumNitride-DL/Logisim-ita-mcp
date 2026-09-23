@@ -29,6 +29,12 @@ import com.google.gson.JsonObject;
 
 /** Tools that let an agent discover what it can build with. */
 public final class CatalogTools {
+	/** Said instead of a port list when the component cannot be built outside a circuit. */
+	private static final String PORTS_UNKNOWN = "this component's pins cannot be listed without placing it";
+
+	/** Said beside an empty port list, so that "no pins" is an answer rather than a silence. */
+	private static final String PORTS_NONE = "this component has no pins";
+
 	private CatalogTools() {
 	}
 
@@ -68,6 +74,11 @@ public final class CatalogTools {
 								+ "this text (case insensitive)"))
 						.opt("verbose", Schemas.bool("Always include the full attribute list (otherwise it is "
 								+ "included only for small result sets)"))
+						.opt("terse", Schemas.bool("Include attribute names and port names, directions and "
+								+ "widths for every match, without defaults, option lists, hints or positions. "
+								+ "This is the cheap way to ask \"does this component have a label?\" - a 9 "
+								+ "component library answers in a couple of hundred characters instead of "
+								+ "twelve thousand"))
 						.opt("limit", Schemas.integer("Maximum number of components to return (default 200)"))) {
 			@Override
 			public JsonElement call(ToolContext ctx) {
@@ -92,8 +103,9 @@ public final class CatalogTools {
 					}
 					matches.add(entry);
 				}
-				boolean withAttributes = verbose || matches.size() <= 8;
-				boolean withPorts = verbose || matches.size() <= 8;
+				boolean terse = ctx.optBool("terse", false);
+				boolean withAttributes = verbose || terse || matches.size() <= 8;
+				boolean withPorts = verbose || (!terse && matches.size() <= 8);
 
 				JsonArray components = new JsonArray();
 				int emitted = 0;
@@ -113,11 +125,19 @@ public final class CatalogTools {
 						}
 						item.add("pins", pins);
 					} else {
-						item.addProperty("port_count", portCount(entry.factory));
+						Integer count = portCount(entry.factory);
+						if (count != null) {
+							item.addProperty("port_count", count);
+						}
 						if (withPorts) {
-							JsonArray ports = describeFactoryPorts(entry.factory);
-							if (ports != null) {
+							JsonArray ports = describeFactoryPorts(entry.factory, terse);
+							if (ports == null) {
+								item.addProperty("ports_note", PORTS_UNKNOWN);
+							} else {
 								item.add("ports", ports);
+								if (ports.size() == 0) {
+									item.addProperty("ports_note", PORTS_NONE);
+								}
 							}
 						}
 					}
@@ -147,6 +167,7 @@ public final class CatalogTools {
 				ret.addProperty("returned", components.size());
 				ret.addProperty("attributes_included", Boolean.valueOf(withAttributes));
 				ret.addProperty("ports_included", Boolean.valueOf(withPorts));
+				ret.addProperty("terse", Boolean.valueOf(terse));
 				ret.add("components", components);
 				return ret;
 			}
@@ -155,29 +176,48 @@ public final class CatalogTools {
 
 	/** Number of ports, for factories whose components have them. */
 	static Integer portCount(com.cburch.logisim.comp.ComponentFactory factory) {
-		java.util.List<com.cburch.logisim.instance.Port> ports = factoryPorts(factory);
-		return ports == null ? null : Integer.valueOf(ports.size());
-	}
-
-	/**
-	 * The ports of a component of this type, built from a throwaway instance so that the
-	 * library computes them the same way it does for a component on the canvas: many
-	 * components (a flip-flop, a counter, a RAM) work out their ports from their
-	 * attributes, and their factory on its own has none to report.
-	 */
-	private static java.util.List<com.cburch.logisim.instance.Port> factoryPorts(
-			com.cburch.logisim.comp.ComponentFactory factory) {
-		if (!(factory instanceof com.cburch.logisim.instance.InstanceFactory)) {
+		com.cburch.logisim.comp.Component probe = factoryProbe(factory);
+		if (probe == null) {
 			return null;
 		}
 		try {
-			AttributeSet defaults = factory.createAttributeSet();
-			com.cburch.logisim.comp.Component probe = factory.createComponent(
-					com.cburch.logisim.data.Location.create(0, 0), defaults);
-			return com.cburch.logisim.instance.Instance.getInstanceFor(probe).getPorts();
+			return Integer.valueOf(probe.getEnds().size());
 		} catch (Throwable t) {
 			return null;
 		}
+	}
+
+	/**
+	 * A component of this type, built from the factory's default attributes and left off the
+	 * canvas, so that the library works out its ports the way it does for a component the user
+	 * placed: a flip-flop, a counter, a RAM and a splitter all compute their pins from their
+	 * attributes, and the factory on its own has none to report.
+	 *
+	 * <p>
+	 * Nothing is added to any circuit - the component is created, asked for its ends and
+	 * dropped - and it is the same object the placed-component path describes, so the catalogue
+	 * and a component on the canvas cannot disagree about a pin. Null when the factory cannot
+	 * build one at all, which the caller reports instead of hiding.
+	 * </p>
+	 */
+	private static com.cburch.logisim.comp.Component factoryProbe(
+			com.cburch.logisim.comp.ComponentFactory factory) {
+		try {
+			AttributeSet defaults = factory.createAttributeSet();
+			return factory.createComponent(com.cburch.logisim.data.Location.create(0, 0), defaults);
+		} catch (Throwable t) {
+			return null;
+		}
+	}
+
+	/**
+	 * One attribute by name, for the terse catalogue mode: enough to answer "does this
+	 * component have a label?" without the defaults, hints and option lists.
+	 */
+	private static JsonObject attributeName(Attribute<?> attribute) {
+		JsonObject ret = new JsonObject();
+		ret.addProperty("name", attribute.getName());
+		return ret;
 	}
 
 	/**
@@ -189,44 +229,49 @@ public final class CatalogTools {
 	 * relative to the component's anchor. The ports come from the component the library
 	 * would build with its default attributes, so a component whose shape depends on its
 	 * attributes is described in that default shape - the component a tool actually places
-	 * reports its own ports, with the same names.
+	 * reports its own ports, read the same way, with the same names.
 	 * </p>
 	 */
-	static JsonArray describeFactoryPorts(com.cburch.logisim.comp.ComponentFactory factory) {
-		java.util.List<com.cburch.logisim.instance.Port> ports = factoryPorts(factory);
-		if (ports == null) {
+	static JsonArray describeFactoryPorts(com.cburch.logisim.comp.ComponentFactory factory, boolean terse) {
+		com.cburch.logisim.comp.Component probe = factoryProbe(factory);
+		if (probe == null) {
 			return null;
 		}
-		AttributeSet defaults;
+		java.util.List<com.cburch.logisim.comp.EndData> ends;
 		try {
-			defaults = factory.createAttributeSet();
+			ends = probe.getEnds();
 		} catch (Throwable t) {
 			return null;
 		}
+		if (ends == null) {
+			return null;
+		}
+		List<String> names = McpSession.portNames(probe);
 		JsonArray ret = new JsonArray();
-		int index = 0;
-		for (com.cburch.logisim.instance.Port port : ports) {
-			final int portIndex = index++;
+		for (int index = 0; index < ends.size(); index++) {
+			com.cburch.logisim.comp.EndData end = ends.get(index);
 			JsonObject item = new JsonObject();
-			item.addProperty("index", Integer.valueOf(portIndex));
-			String name = port.getToolTip();
-			if (name != null && !name.isEmpty()) {
-				item.addProperty("name", name);
-			}
-			try {
-				com.cburch.logisim.comp.EndData end = port.toEnd(com.cburch.logisim.data.Location.create(0, 0),
-						defaults);
-				item.add("at", Json.array(Integer.valueOf(end.getLocation().getX()),
-						Integer.valueOf(end.getLocation().getY())));
-				item.addProperty("width", Integer.valueOf(end.getWidth().getWidth()));
-				String corrected = com.cburch.logisim.mcp.PortFixups.correction(factory.getName(), portIndex);
-				item.addProperty("direction",
-						corrected != null ? corrected : McpSession.endType(end.getType()));
-				if (corrected != null) {
-					item.addProperty("direction_note", com.cburch.logisim.mcp.PortFixups.NOTE);
+			item.addProperty("index", Integer.valueOf(index));
+			if (names != null && index < names.size()) {
+				String name = names.get(index);
+				if (name != null && !name.isEmpty()) {
+					item.addProperty("name", name);
 				}
-			} catch (Throwable t) {
-				// a port whose width comes from an attribute that cannot be resolved here
+			}
+			if (end != null) {
+				try {
+					com.cburch.logisim.data.Location at = end.getLocation();
+					if (at != null && !terse) {
+						item.add("at", Json.array(Integer.valueOf(at.getX()), Integer.valueOf(at.getY())));
+					}
+					McpSession.addWidth(item, end.getWidth());
+					item.addProperty("direction", McpSession.portDirection(factory, index, end));
+					if (com.cburch.logisim.mcp.PortFixups.isCorrected(factory.getName(), index)) {
+						item.addProperty("direction_note", com.cburch.logisim.mcp.PortFixups.NOTE);
+					}
+				} catch (Throwable t) {
+					// a port whose width comes from an attribute that cannot be resolved here
+				}
 			}
 			ret.add(item);
 		}

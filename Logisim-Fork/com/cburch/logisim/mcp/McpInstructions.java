@@ -206,10 +206,18 @@ public final class McpInstructions {
 	public static final String COMPONENT_CATALOG = "Lists the components that can be placed in a circuit, optionally filtered by library and by a "
 					+ "name substring, together with each component's attributes (name, type, default, and the "
 					+ "legal values where Logisim can report them), its port count, and - for a small result set or with "
-					+ "'verbose' - each port's name, direction, width and position. The names are the library's own "
+					+ "'verbose' - each port's name, direction, width and position, for every component in every "
+					+ "library, including ones whose pins the library works out for itself (a splitter reports which "
+					+ "bits each of its pins carries). The names are the library's own "
 					+ "(\"clock\", \"clear\", \"D\", \"Q\", \"carry out\"), and they are the answer to \"what does each pin do\": "
 					+ "check them before wiring a component up, because guessing which input is the clock is how a "
-					+ "circuit ends up silently wrong. Call this before "
+					+ "circuit ends up silently wrong. A port with no 'name' has none in Logisim - most gates and the "
+					+ "flip-flops' data inputs - so refer to it by index ('c3.1'); a port with 'width_note' instead of "
+					+ "'width' takes the width of whatever it is attached to; and 'ports_note' explains a component "
+					+ "that has no pins at all or whose pins cannot be listed. With 'terse: true' every match is "
+					+ "described cheaply - attribute names and types, and port names, directions and widths, without "
+					+ "defaults, hints, option lists or positions - which is how to ask \"does this component have a "
+					+ "label?\" about a whole library at once. Call this before "
 					+ "logisim_component_add so that attribute names and values are correct; for example a Pin has "
 					+ "a boolean attribute 'output' (true makes it an output pin) and a 'facing' attribute with "
 					+ "values north/east/south/west.";
@@ -233,7 +241,9 @@ public final class McpInstructions {
 					+ "simulates and shows when the file is opened.";
 
 	public static final String CIRCUIT_SELECT = "Switches which circuit subsequent tools act on and which circuit's simulation state is used. "
-					+ "Just an editing convenience: it changes nothing in the project itself.";
+					+ "Give it as 'circuit' - the same argument name every other tool uses - and it reports the circuit "
+					+ "it left, so a call that edits somewhere unexpected is visible. Just an editing convenience: it "
+					+ "changes nothing in the project itself.";
 
 	public static final String CIRCUIT_STATS = "Counts how many components of each type a circuit uses, including those pulled in through "
 					+ "subcircuits. Useful to check that a generated design uses the components you intended.";
@@ -265,8 +275,8 @@ public final class McpInstructions {
 			+ "where 'expect' is optional: with it, each vector comes back as pass or fail and the mismatching pins "
 			+ "are named. A single test may be given as 'values' with 'expect' beside it. Values take the same forms "
 			+ "as logisim_sim_set_input, including hex such as 0xFF; pass 'include_signals: false' to keep the answer "
-			+ "small when only the expected pins matter.";
-
+					+ "small when only the expected pins matter, and 'radix' (bin, hex, dec, signed) to have the observed "
+					+ "values written in the form you want to read them in.";
 	public static final String COMPONENT_ADD = "Places one component (gate, pin, flip-flop, multiplexer, memory, subcircuit, ...) at a position in "
 					+ "a circuit. Returns the new component's session id, its ports and their positions. "
 					+ "Components are not connected by placement: add wires with logisim_wire_add so that a wire "
@@ -280,8 +290,41 @@ public final class McpInstructions {
 					+ "makes every further edit and every later load of the file hang until the Java heap is exhausted. "
 					+ "An attribute this component does not have is skipped and listed under 'ignored_attributes' - "
 					+ "'label' does not exist on Arithmetic and Plexers components - and pass "
-					+ "on_unknown_attribute: \"fail\" if you would rather be refused. The reply gives every port a 'ref' "
-					+ "that logisim_wire_add accepts, which is safer than arithmetic on coordinates.";
+					+ "on_unknown_attribute: \"fail\" if you would rather be refused. A coordinate that is not a "
+					+ "multiple of 10 is refused too, because that is the coordinate the damage above starts from; pass "
+					+ "on_off_grid: \"warn\" (place it and say so) or \"allow\" when you mean it. A circuit cannot be "
+					+ "placed inside itself: Logisim's own editor refuses that, and so does this, because a circuit that "
+					+ "contains itself cannot be simulated - the propagator recurses until the stack overflows and the "
+					+ "session hangs. The reply gives every port a 'ref' "
+					+ "that logisim_wire_add accepts, which is safer than arithmetic on coordinates. To place several "
+					+ "components at once, use logisim_component_add_many; to repeat one, logisim_component_duplicate.";
+
+	public static final String COMPONENT_ADD_MANY = "Places many components in one call, committed as a single undoable edit. 'components' is a list "
+					+ "of {type, x, y, lib?, label?, facing?, width?, attributes?} objects, each exactly what "
+					+ "logisim_component_add takes, and they are placed in order. Use this instead of one call per "
+					+ "component when building anything of size: a reply per component costs a full attribute table, a "
+					+ "port list and an unconnected-port warning each time. Nothing is reported about connectivity per "
+					+ "component here - wire the parts up and check the result with logisim_circuit_nets. 'include_ports: "
+					+ "false' drops the port lists and returns only the ids and positions, and 'dry_run' reports what "
+					+ "would be placed without placing it. If one component is impossible the whole call is refused and "
+					+ "nothing is placed, so a batch is all or nothing.";
+
+	public static final String COMPONENT_DUPLICATE = "Copies a component (or a wire) several times, each copy offset from the previous one by 'dx'/'dy': "
+					+ "'count' copies at 1x, 2x, ... the step. This draws a row or a bank of the same part in one call and "
+					+ "one undo step - a bank of tunnels, a row of gates, a set of pins. 'attributes' changes the copies only "
+					+ "(for a row of tunnels that is where the different labels go); everything else is copied as it is, "
+					+ "including the label, and if the source is labelled and the copies are not relabelled the answer says "
+					+ "so, because two tunnels with one label are one signal. Nothing is wired to the copies: run the wires "
+					+ "with logisim_wire_add afterwards, using the 'ref' of each port.";
+
+	public static final String SCREENSHOT = "Draws a circuit as a PNG and returns it as an image, so that its layout can be looked at rather "
+					+ "than guessed at. Works with or without a window: it renders offscreen, so a headless session can "
+					+ "produce a picture too. By default it draws everything the circuit uses plus a small margin; give "
+					+ "'region' [x, y, width, height] and 'scale' to look closely at one part, 'print_view' for the "
+					+ "uncoloured view, 'transparent' for a see-through background, and 'path' to write the file as well "
+					+ "so the user can open it. The picture shows what is drawn, not what is connected: a wire that crosses "
+					+ "another looks the same as one that joins it, so check the electrical side with "
+					+ "logisim_circuit_nets. Very large requests are refused rather than exhausting the heap.";
 
 	public static final String COMPONENT_REMOVE = "Removes a component or a single wire from a circuit. Attached wires are left in place, so they may "
 					+ "end up dangling; remove them separately with logisim_wire_remove if that is not wanted.";
@@ -289,9 +332,9 @@ public final class McpInstructions {
 	public static final String COMPONENT_MOVE = "Moves a component to a new position, given either absolute 'x'/'y' or a relative 'dx'/'dy'. "
 					+ "Logisim does not drag wires along, so any wire that ended on the component's old port "
 					+ "positions will be left behind: the result reports how many, and you should re-add those "
-					+ "connections with logisim_wire_add. The new position must be at x >= 0 and y >= 0, for the same "
-					+ "reason as logisim_component_add. Consider removing and re-adding a component instead if "
-					+ "it is already wired.";
+					+ "connections with logisim_wire_add. The new position must be at x >= 0 and y >= 0, and a multiple "
+					+ "of 10 ('on_off_grid' works here as it does in logisim_component_add), for the same reason as "
+					+ "there. Consider removing and re-adding a component instead if it is already wired.";
 
 	public static final String COMPONENT_SET_ATTRIBUTES = "Changes one or more attributes of an existing component, for example renaming a pin (label), "
 					+ "switching a pin between input and output (output = true/false), widening a bus (width), or "
@@ -313,7 +356,11 @@ public final class McpInstructions {
 					+ "the origin is off the user's canvas), and give an explicit steering point rather than forcing an "
 					+ "alignment that the router refuses. A start or end that touches no port and no wire is reported back "
 					+ "with the nearest port named, which is usually the coordinate that was meant. For anything longer than "
-					+ "a couple of segments, or shared by several components, use a tunnel rather than a long wire.";
+					+ "a couple of segments, or shared by several components, use a tunnel rather than a long wire. A point "
+					+ "that is not a multiple of 10 is refused: that is the coordinate at which Logisim's repair splits a "
+					+ "wire and leaves a diagonal one behind, so pass on_off_grid: \"warn\" if you have a reason. The "
+					+ "answer also names every existing wire the new wiring lands on or lies along, with the net it becomes "
+					+ "part of: that is the connection you did not ask for, and it is worth one look before the next edit.";
 
 	public static final String WIRE_REMOVE = "Removes one wire segment, either by its id (as reported by logisim_circuit_describe) or by giving "
 					+ "its exact 'from' and 'to' points, or every segment through a point with 'loc'. Use 'loc' when "
@@ -404,7 +451,9 @@ public final class McpInstructions {
 					+ "component does electrically, not by the direction shown in 'ports': inside the circuit an input pin "
 					+ "is the source of its net and an output pin only reads it. Ports that can drive when enabled "
 					+ "(tristate, buses) are counted separately as 'bidirectional'. Nets are numbered largest first, so "
-					+ "n1 is the most connected one; pass 'net' or 'port' to look at a single node.";
+					+ "n1 is the most connected one; pass 'net' or 'port' to look at a single node. Pass 'compact: true' "
+					+ "for one line per net (id, labels, drivers, size and the references of its ports) when you want to "
+					+ "survey a whole circuit cheaply first and then ask about the net you care about.";
 
 	public static final String STATUS = "Reports the state of the Logisim session: whether a file is open, where it came from, "
 					+ "which circuits exist, which circuit is current, and how the simulation currently stands. "
@@ -422,15 +471,21 @@ public final class McpInstructions {
 
 	public static final String SIM_SET_INPUT = "Drives one input pin to a value and propagates the circuit, so combinational logic settles "
 					+ "immediately. Values may be 0, 1, x (unknown), e (error/conflict), z (high impedance), or an "
-					+ "integer for a multi-bit pin (decimal, 0x hex, 0b binary). Identify the pin by its label or "
-					+ "by its location \"x,y\".";
+					+ "integer for a multi-bit pin (decimal, 0x hex, 0b binary). A value that does not fit the pin, or "
+					+ "that makes no sense at all, is refused: nothing is ever quietly rounded to 0. Identify the pin by "
+					+ "its label or by its location \"x,y\". The reply echoes what each value was understood as.";
 
 	public static final String SIM_SET_INPUTS = "Drives several input pins at once and propagates the circuit once at the end, which is the fast and "
-					+ "deterministic way to apply a test vector before reading the outputs.";
+					+ "deterministic way to apply a test vector before reading the outputs. The reply echoes what each "
+					+ "value was understood as under 'parsed', so a value that was read differently from what you meant "
+					+ "is visible at once rather than showing up as a strange result later.";
 
 	public static final String SIM_READ = "Reads the current value of named signals (pin labels) or of specific locations, without changing "
 					+ "anything. Values are those from the most recent propagation; call logisim_sim_propagate or "
-					+ "logisim_sim_set_input first if the circuit has just been edited.";
+					+ "logisim_sim_set_input first if the circuit has just been edited. Each value comes back as a bit "
+					+ "pattern, and a value whose bits are all known also gets 'hex', plus 'dec' and 'signed' from four "
+					+ "bits up, so a 32-bit result can be read without counting characters; 'radix' adds one of those "
+					+ "readings as 'text' (bin, hex, dec, signed).";
 
 	public static final String SIM_READ_ALL = "Reads every pin of a circuit at once and returns the values both as a simple name-to-value map and "
 					+ "as a detailed list including each pin's direction, width, position and the value the pin "

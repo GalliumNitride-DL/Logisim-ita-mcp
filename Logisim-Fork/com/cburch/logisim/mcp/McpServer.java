@@ -270,6 +270,7 @@ public class McpServer {
 	}
 
 	private static JsonObject toolResult(JsonElement payload) {
+		JsonObject image = imageBlock(payload);
 		String text;
 		if (payload == null || payload.isJsonNull()) {
 			text = "ok";
@@ -279,6 +280,10 @@ public class McpServer {
 			text = Json.pretty(payload);
 		}
 		JsonArray content = new JsonArray();
+		if (image != null) {
+			content.add(Json.object("type", "image", "data", image.get("data").getAsString(), "mimeType",
+					image.has("mimeType") ? image.get("mimeType").getAsString() : "image/png"));
+		}
 		content.add(Json.object("type", "text", "text", text));
 
 		JsonObject ret = new JsonObject();
@@ -288,6 +293,43 @@ public class McpServer {
 		}
 		ret.addProperty("isError", Boolean.FALSE);
 		return ret;
+	}
+
+	/**
+	 * Takes the image out of a tool's result, if it has one, and leaves a note in its place.
+	 *
+	 * <p>
+	 * A tool that draws something returns its PNG as base64 under {@code image}. That belongs
+	 * in an MCP {@code image} content block, which is what a client can actually show; left in
+	 * the JSON it would also be repeated in the text form and in the structured copy, tripling
+	 * an answer that is often a few hundred kilobytes. So the data is lifted out and replaced
+	 * by a note saying where it went - the size and kind stay visible, and nothing is lost.
+	 * </p>
+	 */
+	private static JsonObject imageBlock(JsonElement payload) {
+		if (payload == null || !payload.isJsonObject()) {
+			return null;
+		}
+		JsonObject obj = payload.getAsJsonObject();
+		JsonElement block = obj.get("image");
+		if (block == null || !block.isJsonObject()) {
+			return null;
+		}
+		JsonObject image = block.getAsJsonObject();
+		if (!image.has("data")) {
+			return null;
+		}
+		JsonObject slim = new JsonObject();
+		java.util.Iterator<java.util.Map.Entry<String, JsonElement>> entries = image.entrySet().iterator();
+		while (entries.hasNext()) {
+			java.util.Map.Entry<String, JsonElement> entry = entries.next();
+			if (!"data".equals(entry.getKey())) {
+				slim.add(entry.getKey(), entry.getValue());
+			}
+		}
+		slim.addProperty("data", "sent as the image part of this reply");
+		obj.add("image", slim);
+		return image;
 	}
 
 	private static JsonObject errorResult(Throwable t) {
