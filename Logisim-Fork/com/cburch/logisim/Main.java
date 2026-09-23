@@ -52,9 +52,23 @@ public class Main {
 
 	// get the runtinme java version
 	private final static double getVersion() {
-		String version = System.getProperty("java.version");
-		byte pos = (byte) version.indexOf('.', version.indexOf('.') + 1);
-		return Double.parseDouble(version.substring(0, pos));
+		// Java 9+ may report "9", "11" or "23" instead of "9.0.1". Accept the
+		// leading numeric dotted version and stop at build metadata such as "_65".
+		String version = System.getProperty("java.version", "8");
+		StringBuilder number = new StringBuilder();
+		for (int i = 0; i < version.length(); i++) {
+			char c = version.charAt(i);
+			if ((c >= '0' && c <= '9') || (c == '.' && number.length() > 0)) {
+				number.append(c);
+			} else {
+				break;
+			}
+		}
+		while (number.length() > 0 && number.charAt(number.length() - 1) == '.')
+			number.setLength(number.length() - 1);
+		if (number.length() == 0)
+			return 8.0;
+		return Double.parseDouble(number.toString());
 	}
 
 	public static void main(String[] args) throws Exception {
