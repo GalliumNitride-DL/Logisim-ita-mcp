@@ -65,7 +65,7 @@ try {
 
     $list = "build\sources.txt"
     Get-ChildItem -Recurse -Filter *.java com |
-        ForEach-Object { $_.FullName.Replace('\', '/') } |
+        ForEach-Object { '"' + $_.FullName.Replace('\', '/') + '"' } |
         Set-Content $list -Encoding ASCII
     $count = (Get-Content $list).Count
 
