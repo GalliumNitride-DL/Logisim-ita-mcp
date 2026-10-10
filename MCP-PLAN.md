@@ -19,7 +19,7 @@ by a workspace clean, which is why it now lives in the repository).*
 | Entry point | `com.cburch.logisim.Main -mcp` (headless) or `-mcp --with-gui` (inside the window); options `--transport stdio\|tcp\|http`, `--port`, `--host`, `--file f.circ`, `--help` |
 | Code | `Logisim-Fork/com/cburch/logisim/mcp` (21 files) + `.../mcp/tools` (14 files) |
 | Existing code touched | `Main.main` (the `-mcp` dispatch and the GUI hook), `gui/menu/MenuHelp.java` (one item, `Help | MCP Server…`), `gui/log/ComponentSelector.java` (one line, upstream's own later fix); plus the new `gui/main/SelectionBridge.java` and `gui/mcp/McpFrame.java` |
-| Tools | **51** (see §3.1) |
+| Tools | **54** (see §3.1) |
 | Build | `Logisim-Fork/build-mcp.ps1` → `Logisim-Fork/build/classes`; see §7 |
 | Packaging | `build-mcp.ps1 -Jar -Exe -Single [-Console]` → jars and two kinds of Windows exe (§3.3) |
 | Editor setup | root `.classpath` + `.vscode/settings.json` describe the layout; JDT output is `Logisim-Fork/build/jdt` |
@@ -67,9 +67,11 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 | GUI (live mode) | `logisim_gui_status`, `logisim_gui_windows`, `logisim_gui_focus`, `logisim_gui_select`, `logisim_gui_deselect`, `logisim_gui_read_only`, `logisim_gui_pause` |
 | Picture | `logisim_screenshot` (PNG of a circuit or a region, drawn offscreen so it works headless and with a window open; `scale`, `max_pixels`, `print_view`, `transparent`, `path`) |
 | Editing | `logisim_component_add` (`on_unknown_attribute`, `dry_run`), `logisim_component_add_many` (a list of the same objects, one undo step, all or nothing), `logisim_component_duplicate` (`dx`/`dy`/`count`, `attributes` for the copies only), `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add` (`points` / `paths` / `from`+`to`, auto-routing, `dry_run`, `joins`), `logisim_wire_remove` (`wire` / `from`+`to` / `loc`) |
-| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status`, `logisim_sim_run_vectors` (all with `radix`, and `parsed` echoing how each value was read) |
+| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_trace` (the sequence table of signals over n cycles), `logisim_sim_status`, `logisim_sim_run_vectors` (all with `radix`, and `parsed` echoing how each value was read) |
+| Memory | `logisim_component_memory` (read, write and clear the contents of a ROM or a RAM) |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
 | Repair | `logisim_circuit_repair_wires` |
+| Self test | `logisim_self_test` (fourteen checks in a session of its own, ~1 s, a report of what failed) |
 
 ### 3.2 Behaviour
 
@@ -117,6 +119,12 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
   wire but not on it (Logisim splits the wire there and keeps the off-grid location, which is how the
   diagonal wire of §2 is created; `logisim_wire_remove {loc}` stays permissive, since removing it is the
   cure). An off-grid point elsewhere is refused with `on_off_grid: "warn"`/`"allow"` as the escape.
+- **A call says when the circuit itself has become the problem**, because neither the heap nor the size
+  of a circuit is visible to an agent: `logisim_status` reports `heap_used_percent` and `heap_pressure`,
+  above four fifths of the heap *every* tool result carries the warning with the numbers and the `-Xmx`
+  suggestion, a call that took five seconds or more says how long and what to batch instead, and a
+  mutating call on a circuit with more than 400 components or 800 wires warns before the next one. The
+  advice never changes a result, and a failure in producing it can never fail a call.
 
 ### 3.3 Packaging (added on this branch)
 
@@ -231,6 +239,48 @@ the process is stopped.
   refusal all exercised. The three P0/P1 regression suites were re-run against the 51-tool build: the same
   14 lint findings on the trial circuit, `nets problems_only` and both dry runs unchanged, and the 79-
   component catalogue audit still reporting a port list or a reason for every one.
+- **`logisim_self_test` is implemented and green on 2.15.0.1**: fourteen checks in about 1.2 s
+  (`ok: true, check_count: 14, passed: 14`), run against a second session so nothing of the open project
+  is touched. Running it found a defect in its own trace fixture within the first minute - a D
+  flip-flop's data input has no name in Logisim, so the fixture had wired the complement to the output -
+  which is the behaviour the tool exists for. It also **closed the one verification gap left open**
+  (§3.5, `logisim_file_recover`'s rewrite branch): the check writes a `.circ`, rewrites one axis-aligned
+  wire element into a diagonal one, and confirms that `logisim_file_open` refuses it with the reason and
+  `logisim_file_recover` rescues it with `skewed_wire_count: 0`. Subsets work (`checks: ["simulate"]`),
+  and a failing run keeps its scratch project in the temp directory.
+- **`logisim_component_memory`** reads, writes and clears the words of a ROM and a RAM. Verified: a ROM
+  accepted three words (`changed: 3`), read them back on the address, survived `logisim_undo` (the first
+  word returned to `0x00`) and survived a save/close/reopen round trip; a RAM accepted words and a `fill`,
+  and reported `undoable: false` with `persistence: "not saved"` - which is Logisim's own behaviour and
+  was confirmed by the round trip, where the RAM came back empty. An out-of-range address and a value too
+  wide for the memory (`0x1234` in a byte) are both refused with the range or the width.
+- **`logisim_sim_trace`** records signals over cycles. Verified on a flip-flop whose complement feeds its
+  data input: the rows alternate, `cycle: 0` is the state before the first edge (`x`), `only_changes`
+  collapses seven rows to four, `radix: "hex"` reads a 32-bit value, and a signal may be named by label,
+  by `"c1.1"` or by `"c1.Q"`.
+- **The router grew a search and lost a bug**: the two single corners and the eight fixed lanes are
+  still tried first, and a bounded search over the grid of interesting coordinates (the ends, and one or
+  two grid steps either side of every port and wire end) now handles what they cannot, with collinear
+  steps collapsed so a route is three wires rather than twenty. Testing it exposed a real defect in the
+  old heuristics: **a corner landing exactly on a port was accepted**, which silently joined that port to
+  the net - reproduced with two tunnels placed on the two natural corner positions, where the netlist
+  showed the tunnel on the net; with the corner rule added, the same call routes around
+  (`segments_created: 3`) and the tunnels stay `unconnected_port_refs`. Only an *interior* port was
+  checked before; an endpoint landing on a port is exactly what a wire is supposed to do for the two
+  ends of the route, and exactly what an intermediate corner must never do.
+- **Three defects outside the new work were found and fixed while testing** (all in this layer's own
+  files, nothing of Logisim's circuit logic):
+  1. **`Main.getVersion()` threw on every real runtime** - `Double.parseDouble` on `1.8.0` (or `21.0.2`)
+     fails with *multiple points*, so `Main`'s static initialiser died and **the server could not start at
+     all** on this machine (`java` on PATH is 1.8). The leading `major.minor` is now read, which is what
+     the nine `JAVA_VERSION < 10.0` guards actually ask about. This is why the earlier sessions' run
+     instructions could not have worked: it is a one line defect that made the whole feature unusable.
+  2. **A component id could not be resolved after `logisim_file_open`** until something happened to index
+     the circuit, so `{"component": "c1"}` on a freshly opened file answered *no component 'c1'* - and
+     every tool that takes a reference was affected, not just the new one. `findById` now hands out the ids
+     (which is idempotent, and uses the same order `logisim_circuit_describe` reports) before giving up.
+  3. **The size and heap advice** described below, which turned the two failure modes this project has
+     actually suffered into something a call says out loud.
 
 ---
 
@@ -286,18 +336,29 @@ the process is stopped.
 3. **`logisim_circuit_nets`** — each net with its ports, labels and width, plus which port drives it.
    **Implemented and verified** (see §3.5); it walks the circuit directly rather than reaching into Logisim's
    package-private bundle map, so nothing was added inside an original package.
-4. **`logisim_self_test`** - one call that builds a known circuit, checks a truth table, exercises batched
+4. **`logisim_self_test`** — **DONE this round**, as designed below (fourteen checks in a session of its
+   own, ~1.2 s, a subset runnable by name, the scratch project kept when something fails). It closed the
+   `logisim_file_recover` gap as planned and immediately found one defect in its own fixture. One call
+   that builds a known circuit, checks a truth table, exercises batched
    wiring, a dry run, the lint, the catalogue and a save/load round trip, and returns pass/fail. The repo has
    no tests, so this doubles as a smoke test for every future change, including the packaging switches. It is
    also the only way to close the one verification gap left (the rewrite branch of `logisim_file_recover`,
    §3.5), by building the damaged fixture in the temp directory instead of resurrecting `riscv-alu.circ`.
    **Designed in full below.**
-5. **Memory contents** — read/write ROM/RAM contents (`logisim_component_memory`); ALU/CPU work needs it and
-   the fork already stores them as an `addr/data` attribute.
-6. **Better router** — replace the two-corner + Z-lane heuristics in `logisim_wire_add` with a grid search
-   guided by Logisim's own `AvoidanceMap`, so dense wiring needs no hand-made steering points.
-7. **Size/time guards** — warn (or refuse) when one edit would touch a very large circuit, and surface the
-   `-Xmx` hint when the heap is tight.
+5. **Memory contents** — **DONE this round**: `logisim_component_memory` reads, writes and clears a ROM's
+   or a RAM's words and says where the words live (a ROM keeps them in an undoable attribute that the file
+   carries, a RAM in simulation state that is neither undoable nor saved - Logisim's own behaviour,
+   confirmed by a round trip). ALU/CPU work needs it and the fork already stores them as an
+   `addr/data` attribute.
+6. **Better router** — **DONE this round**, as a bounded A* search over the grid of interesting
+   coordinates (the ends, and a grid step or two either side of every port and every wire end), tried only
+   where the two single corners and the eight fixed lanes fail, with collinear steps collapsed and a
+   corner that lands on a port refused. Logisim's `AvoidanceMap` was not used: it serves the GUI's
+   interactive tool, and the search answers the same question with no coupling to it.
+7. **Size/time guards** — **DONE this round**: `heap_pressure` in `logisim_status`, a heap warning with a
+   `-Xmx` suggestion appended to every result once the heap is four fifths full, an explanation on a call
+   that took five seconds or more, and a warning on a mutating call to a circuit with more than 400
+   components or 800 wires. Verified on a 452 component circuit.
 
 #### `logisim_self_test` in detail (P1.4)
 
@@ -381,23 +442,25 @@ run means something.
 
 ## 6. Immediate next steps
 
-1. **Commit the current work** — the P0/P1 feedback items, this third round (`logisim_component_add_many`,
-   `logisim_component_duplicate`, `logisim_screenshot`, the two new refusals, `joins`, `parsed`, `hex`/`dec`/
-   `signed`, `compact`, `terse`) plus the refreshed `MCP.md`, the plan and `MCP-AGENT-FEEDBACK.md`. It is a
-   large but self-contained and verified change set; the next item should not start on top of it.
-2. **`logisim_self_test`** (designed in full under P1.4) - the call that makes every later change safe, and
-   the only remaining way to close the `logisim_file_recover` gap (§3.5). Build the damaged fixture in the
-   system temp folder rather than resurrecting `riscv-alu.circ` (§4). This round's tools give it more to
-   check: `component_add_many` is what its `build` check should use, and the two refusals (off-grid near a
-   wire, a circuit inside itself) are checks of their own.
-3. **Decide on the three library findings** ([`MCP-AGENT-FEEDBACK.md`](MCP-AGENT-FEEDBACK.md) §8.5). Two
+1. **Commit the work.** Two verified rounds are uncommitted: the P0/P1 feedback round and this one
+   (`logisim_self_test`, `logisim_component_memory`, `logisim_sim_trace`, the router search with the
+   corner-on-port fix, the size and heap advice, and the three defects found while testing - the
+   `Main.getVersion()` crash that stopped the server starting at all, the unresolvable component id after
+   `logisim_file_open`, and the corner that landed on a port). It is a large but self-contained and
+   verified change set; nothing should start on top of it.
+2. **Decide on the three library findings** ([`MCP-AGENT-FEEDBACK.md`](MCP-AGENT-FEEDBACK.md) §8.5). Two
    are worth a decision: a `RAM`'s data bus loses its name to a misplaced assignment (one-line swap, no
    effect on simulation), and a `7402` is pinned like a `7400`, which the fork's own later `master` has
    already corrected. Both are Logisim's own files, so they stay untouched until you say otherwise. The
    third - a `Pin`'s port named after the toolbar tool - is cosmetic.
-4. **Then pick by intent**: `logisim_sim_trace` with memory contents if the next work is clocked or CPU-like
-   (`logisim_screenshot` is now done, §5 P2.10).
-5. **Decide P0.1 / P0.2** (the two core fixes) — only then can the GUI be made safe by itself.
+3. **Decide P0.1 / P0.2** (the two core fixes: `WireRepair` must never build a non-axis-aligned wire, and
+   `WireIterator` must terminate on one) — only then can the GUI be made safe by itself.
+4. **Then pick by intent**, on the agent capability axis, in the order the recorded friction suggests:
+   `logisim_connect` (tunnels versus wires, facing and label decided by the tool rather than by prose in
+   the instructions - [`user-mcp-problems.md`](user-mcp-problems.md) items 1 and 3), undo checkpoints
+   (`logisim_checkpoint`, `logisim_undo` to a checkpoint), a `logisim_circuit_diff`, an annotated
+   screenshot that draws each `ref` on the picture, truth-table and vector export, and the protocol
+   breadth items of the round-4 review (resources, prompts, tool annotations, progress and cancellation).
 6. Housekeeping: the orphaned `java -jar …\target\Logisim-jar-with-dependencies.jar -mcp` process, if it is
    still alive, holds a stale **2.16.2.2** build and locks `Logisim-Fork/target/`; the folder can go once it
    is gone.

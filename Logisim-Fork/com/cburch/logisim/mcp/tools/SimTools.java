@@ -47,6 +47,9 @@ public final class SimTools {
 	/** Upper bound for one logisim_sim_tick call, to keep responses bounded. */
 	private static final int MAX_TICKS = 100000;
 
+	/** Upper bound for the rows of one logisim_sim_trace call. */
+	private static final int MAX_TRACE_ROWS = 1000;
+
 	private SimTools() {
 	}
 
@@ -275,6 +278,133 @@ public final class SimTools {
 				if (!clocked && count > 0) {
 					ret.add("note", Json.element("no Clock component fired; add a Clock (Wiring library) to a "
 							+ "circuit that should advance over time"));
+				}
+				return ret;
+			}
+		};
+	}
+
+	/**
+	 * Signals over several clock cycles: the table a sequential circuit has to be checked
+	 * with. One call replaces "tick, read, tick, read, ...", which is both slower and much
+	 * easier to misread.
+	 */
+	public static McpTool trace(final McpSession session) {
+		return new AbstractTool("logisim_sim_trace", McpInstructions.SIM_TRACE,
+				Schemas.object()
+						.opt("signals", Schemas.array(Schemas.string("a pin label, a component id, a \"c3.1\" port "
+								+ "reference or a location written as \"x,y\""),
+								"Signals to record, in this order; defaults to every pin of the circuit"))
+						.opt("cycles", Schemas.integer("Clock cycles to run and record (default 8)"))
+						.opt("tick", Schemas.bool("Run the cycles at all; false records the current values only "
+								+ "(default true)"))
+						.opt("only_changes", Schemas.bool("Emit a row only when a recorded value changed (default "
+								+ "false), which is what makes a long run readable"))
+						.opt("initial", Schemas.bool("Record the state before the first cycle as the row with "
+								+ "'cycle': 0 (default true)"))
+						.opt("radix", Schemas.stringEnum("Reads each cell this way instead of as a bit pattern: "
+								+ "'hex', 'dec' or 'signed' (a 32-bit value needs one of these to be readable)",
+								Values.RADIX_NAMES))
+						.opt("max_rows", Schemas.integer("Refuse a request that would produce more rows than "
+								+ "this (default " + MAX_TRACE_ROWS + ")"))
+						.opt("circuit", Schemas.string("Circuit to use; defaults to the current circuit"))) {
+			@Override
+			public JsonElement call(ToolContext ctx) {
+				session.requireOpen();
+				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
+				CircuitState state = session.stateFor(circuit);
+				String radix = radixOf(ctx);
+
+				List<Location> watched = new ArrayList<Location>();
+				List<String> names = new ArrayList<String>();
+				JsonArray given = ctx.optArray("signals");
+				if (given != null) {
+					for (JsonElement element : given) {
+						// a label, a component id, a "<id>.<port>" reference or an "x,y" location:
+						// the same forms logisim_wire_add accepts, so a signal can be named the way
+						// the agent already refers to it
+						watched.add(session.resolvePoint(circuit, element));
+						names.add(element.isJsonPrimitive() ? element.getAsString() : element.toString());
+					}
+				} else {
+					for (Instance pin : session.pins(circuit)) {
+						watched.add(pin.getLocation());
+						names.add(session.pinName(pin));
+					}
+				}
+				if (watched.isEmpty()) {
+					throw new McpException("this circuit has no pins to watch; pass 'signals' with the \"x,y\" of an "
+							+ "internal wire, or add an output pin to observe");
+				}
+
+				int maxRows = ctx.optInt("max_rows", Integer.valueOf(MAX_TRACE_ROWS)).intValue();
+				if (maxRows < 2 || maxRows > MAX_TRACE_ROWS) {
+					throw new McpException("'max_rows' must be between 2 and " + MAX_TRACE_ROWS);
+				}
+				int cycles = ctx.optInt("cycles", Integer.valueOf(8)).intValue();
+				if (cycles < 0) {
+					throw new McpException("'cycles' must not be negative");
+				}
+				if (cycles > MAX_TICKS) {
+					throw new McpException("'cycles' must not exceed " + MAX_TICKS);
+				}
+				if (!ctx.optBool("tick", true)) {
+					cycles = 0;
+				}
+				boolean onlyChanges = ctx.optBool("only_changes", false);
+				boolean initial = ctx.optBool("initial", true);
+				if (!onlyChanges && cycles + (initial ? 1 : 0) > maxRows) {
+					throw new McpException("tracing " + cycles + " cycles would need more than " + maxRows
+							+ " rows; use fewer cycles, 'only_changes': true to keep just the transitions, or a larger "
+							+ "'max_rows'");
+				}
+
+				Propagator propagator = state.getPropagator();
+				JsonArray rows = new JsonArray();
+				Value[] previous = snapshot(state, watched);
+				if (initial) {
+					rows.add(traceRow(0, names, previous, radix));
+				}
+				int changes = 0;
+				int cyclesDone = 0;
+				boolean anyClockFired = false;
+				boolean oscillating = propagator.isOscillating();
+				for (int i = 0; i < cycles && !oscillating; i++) {
+					anyClockFired |= propagator.tick();
+					propagator.propagate();
+					cyclesDone++;
+					Value[] current = snapshot(state, watched);
+					boolean changed = !same(previous, current);
+					if (changed) {
+						changes++;
+					}
+					if (changed || !onlyChanges) {
+						rows.add(traceRow(i + 1, names, current, radix));
+					}
+					previous = current;
+					oscillating = propagator.isOscillating();
+				}
+
+				JsonObject ret = new JsonObject();
+				ret.addProperty("circuit", circuit.getName());
+				ret.add("signals", Json.array(names));
+				ret.addProperty("signal_count", Integer.valueOf(names.size()));
+				ret.addProperty("cycles_requested", Integer.valueOf(cycles));
+				ret.addProperty("cycles_done", Integer.valueOf(cyclesDone));
+				ret.addProperty("tick_count", propagator.getTickCount());
+				ret.addProperty("changes", Integer.valueOf(changes));
+				ret.addProperty("row_count", Integer.valueOf(rows.size()));
+				ret.addProperty("cells", radix == null
+						? "bit patterns: 0, 1, x (unknown) or e (error); pass 'radix' for hex, dec or signed"
+						: "read as '" + radix + "'");
+				ret.add("rows", rows);
+				if (oscillating) {
+					ret.add("note", Json.element("the circuit is oscillating, so the trace stopped after "
+							+ cyclesDone + " cycle(s): a combinational loop never settles"));
+				} else if (cycles > 0 && !anyClockFired) {
+					ret.add("note", Json.element("no Clock component fired, so nothing advanced: add a Clock "
+							+ "(Wiring library) to a circuit that should change over time, or drive it with "
+							+ "logisim_sim_set_inputs and read it with logisim_sim_read_all"));
 				}
 				return ret;
 			}
@@ -519,6 +649,45 @@ public final class SimTools {
 		InstanceState pinState = state.getInstanceState(pin);
 		Pin.FACTORY.setValue(pinState, value);
 		pinState.fireInvalidated();
+	}
+
+	/** The values of the watched signals right now, in the order they were asked for. */
+	private static Value[] snapshot(CircuitState state, List<Location> watched) {
+		Value[] ret = new Value[watched.size()];
+		for (int i = 0; i < ret.length; i++) {
+			ret[i] = state.getValue(watched.get(i));
+		}
+		return ret;
+	}
+
+	/** True when two snapshots hold the same values, which is what 'only_changes' compares. */
+	private static boolean same(Value[] a, Value[] b) {
+		if (a == null || b == null || a.length != b.length) {
+			return false;
+		}
+		for (int i = 0; i < a.length; i++) {
+			Value left = a[i];
+			Value right = b[i];
+			if (left == right) {
+				continue;
+			}
+			if (left == null || right == null || !left.equals(right)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** One row of a sequence table. */
+	private static JsonObject traceRow(int cycle, List<String> names, Value[] values, String radix) {
+		JsonObject ret = new JsonObject();
+		ret.addProperty("cycle", Integer.valueOf(cycle));
+		JsonObject cells = new JsonObject();
+		for (int i = 0; i < names.size() && i < values.length; i++) {
+			cells.addProperty(names.get(i), read(values[i], radix));
+		}
+		ret.add("values", cells);
+		return ret;
 	}
 
 	/** Compact name-to-value map of every pin in a circuit. */

@@ -52,23 +52,28 @@ public class Main {
 
 	// get the runtinme java version
 	private final static double getVersion() {
-		// Java 9+ may report "9", "11" or "23" instead of "9.0.1". Accept the
-		// leading numeric dotted version and stop at build metadata such as "_65".
+		// java.version looks like "1.8.0_451", "9", "11.0.2+9" or "23-ea", so only the
+		// leading major.minor is read: that is what the callers need, since every one of
+		// them asks whether the runtime is Java 10 or newer to decide between a method
+		// added in Java 10 and its older equivalent. Feeding the whole dotted version to
+		// Double.parseDouble would throw ("multiple points") for any runtime that reports
+		// three components, which is every one of them today.
 		String version = System.getProperty("java.version", "8");
 		StringBuilder number = new StringBuilder();
 		for (int i = 0; i < version.length(); i++) {
 			char c = version.charAt(i);
-			if ((c >= '0' && c <= '9') || (c == '.' && number.length() > 0)) {
+			if (c >= '0' && c <= '9') {
+				number.append(c);
+			} else if (c == '.' && number.length() > 0) {
 				number.append(c);
 			} else {
 				break;
 			}
 		}
-		while (number.length() > 0 && number.charAt(number.length() - 1) == '.')
-			number.setLength(number.length() - 1);
-		if (number.length() == 0)
-			return 8.0;
-		return Double.parseDouble(number.toString());
+		String[] parts = number.toString().split("\\.");
+		String major = parts.length > 0 && parts[0].length() > 0 ? parts[0] : "8";
+		String minor = parts.length > 1 && parts[1].length() > 0 ? parts[1] : "0";
+		return Double.parseDouble(major + "." + minor);
 	}
 
 	public static void main(String[] args) throws Exception {

@@ -31,10 +31,12 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Checks | `logisim_circuit_lint` |
 | Circuits | `logisim_circuit_list`, `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_describe`, `logisim_circuit_stats`, `logisim_circuit_nets` |
 | Editing | `logisim_component_add`, `logisim_component_add_many`, `logisim_component_duplicate`, `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add`, `logisim_wire_remove` |
-| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_status`, `logisim_sim_run_vectors` |
+| Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_trace`, `logisim_sim_status`, `logisim_sim_run_vectors` |
+| Memory | `logisim_component_memory` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
 | Picture | `logisim_screenshot` |
 | Repair | `logisim_circuit_repair_wires` |
+| Self test | `logisim_self_test` |
 
 Every tool returns JSON. Errors come back as `isError: true` with a message that
 says what to do next (for example *"a Pin has no attribute 'nonsense'; its
@@ -143,6 +145,72 @@ these tools exist to make that cheaper, and both commit as a **single undo step*
   `attributes` changes the copies only, which is where a row of tunnels gets its labels;
   the reply warns when the copies keep the original's label, because two tunnels with one
   label are one signal.
+
+### Memory contents: `logisim_component_memory`
+
+A CPU design cannot run until its memory holds something, and before this tool nothing could
+put a program there: the memory was the one part of a circuit the layer could not reach.
+`logisim_component_memory` reads a range of words, writes words, and zeroes the memory, for a
+ROM and for a RAM, with the addresses and values written the way the rest of the server writes
+them (`0x` hex, decimal, `0b` binary) and a value that does not fit the memory's data width
+refused rather than truncated.
+
+The two memories keep their data in different places, and the result says which happened
+rather than hiding the difference:
+
+* a **ROM** holds its words in a component attribute, and that attribute is the text Logisim
+  writes into the `.circ` file - so a write is an ordinary `logisim_undo` step, and the file
+  carries the contents (`persistence: "saved with the file"`). Verified by writing three
+  words, saving, closing, reopening and reading them back;
+* a **RAM** holds its words in the simulation state the simulator attaches to the instance, so
+  a write takes effect at once, is **not** an undo step, and is **not** saved: opening the
+  saved file starts the memory empty again. That is Logisim's own behaviour, not a choice made
+  here, and the reply says so plainly, because an agent that loads a program into a RAM and
+  saves the file has lost the program.
+
+Both are reached through `com.cburch.hex.HexModel`, the interface Logisim's own hex window
+edits, and a ROM's words are put back through the attribute's own parser - so what the circuit
+ends up holding is what Logisim itself would have written, with nothing added to Logisim.
+
+### Sequences: `logisim_sim_trace`
+
+`logisim_sim_tick` says what a circuit reads *now*; a flip-flop, a counter, a shift register or
+a program counter is only verified by what it reads **over time**. `logisim_sim_trace` records
+named signals once per cycle and returns a table: one row per cycle, one column per signal,
+with `only_changes` keeping just the transitions (a six cycle run of a toggle becomes four
+rows instead of seven). Signals are named the way `logisim_wire_add` names endpoints - a pin
+label, a `"c3.1"` or `"c3.Q"` port reference, or an `"x,y"` location - and default to every pin.
+Run against a D flip-flop whose complement feeds its data input, the rows show `x` before the
+first edge and then the alternation, which is the check the self test pins it with.
+
+### Is this server working? `logisim_self_test`
+
+Every failure this project has had was found by hand, with a throwaway script in the temp
+folder. `logisim_self_test` is that idea kept where it can run again: one call, fourteen
+checks, about a second, and a one line answer per check with `ok` and the detail needed to see
+why not. It builds a small circuit of its own in a **second session**, so nothing of the open
+project is touched, changed, saved or closed - which is why it is safe to call at any moment,
+including in live mode with unsaved work on screen.
+
+The checks are `tools`, `catalogue`, `build`, `guard`, `dry_run`, `simulate`, `nets`,
+`analysis`, `lint`, `memory`, `trace`, `save/load`, `recover` and `docs`. Between them they pin
+the things that were once wrong and could go wrong again: that a Splitter reports five named
+ports, that the Adder's Carry Out still comes back as an `output` with its `direction_note`,
+that a negative coordinate, an off grid position and a circuit placed inside itself are all
+refused, that a dry run changes nothing, that an 8-bit adder adds with the right carry, that
+the carry net still has exactly one driver, that the truth table and the minimised expression
+agree with the circuit, that a deliberately wrong circuit is linted, that a ROM write survives
+an undo, that a flip-flop's trace changes over cycles, that a project survives a save and
+reopen, that a file containing a wire Logisim cannot iterate is refused by `file_open` and
+rescued by `file_recover` - the one branch of that tool which had never been exercised - and
+that the bundled manual can still be read (which a jar that lost its `doc` folder cannot do).
+
+A failing check says what it expected and what it saw, and keeps its scratch project in the
+temp directory so the state can be looked at; `checks: ["simulate"]` runs a subset, and each
+check builds whatever it needs first, so a subset works on its own. When this round was
+written the test immediately found a defect in its own trace fixture (the D input of a
+flip-flop has no name in Logisim, so the fixture had wired the complement to the *output*),
+which is exactly what it is for.
 
 ### Making the answer hard to miss
 
@@ -308,6 +376,45 @@ Wires accept `[x, y]`, a pin/component label (`"A"`), a component id (`"c3"`) or
 `logisim_wire_add` also takes `paths`, a list of several such paths, which are all
 committed as one undoable edit. Prefer it when drawing more than one wire: Logisim
 repairs the whole circuit's wiring on every edit, so `n` calls cost `n` repairs.
+
+### How a diagonal pair of points is turned into wires
+
+Given two points that are not in line, the router tries, in order: the two single corner
+routes; Z shaped routes through lanes just outside the ports and the existing wires; and
+finally a **search** over the grid of interesting coordinates - the two ends, and one or two
+grid steps either side of every port and every existing wire end - priced so that a straight run
+costs its length and a corner costs a little more, which is the route a person would draw. The
+search is what handles a circuit packed tightly enough that no corner and no fixed lane is free;
+it is bounded (24 lanes per axis, each step reaching only the next lane), and its result is
+collapsed into maximal straight runs so that a route is three wires rather than twenty.
+
+Two shapes are refused rather than drawn, because both would silently join a component the
+caller never mentioned: a segment that **passes through** a port (Logisim splits the wire there
+and keeps the junction) and a **corner that lands exactly on** a port. The second one was found
+by the new self test's own fixture: with corners at both of the natural corner positions, the
+old router took one of them and shorted a tunnel into the net. If no route passes, the tool
+refuses with the two points, the reason, and an example `points` list to steer with - and
+`dry_run` reports the same route without drawing it.
+
+## When a circuit is large, or the heap is filling up
+
+Every edit repairs the wiring of the whole circuit, so the cost of a call is a function of the
+circuit's size - which is not something an agent can see. Three things therefore say so, in the
+`hint` every tool result can carry:
+
+* `logisim_status` reports `heap_used_percent` and `heap_pressure` under `memory`; once the heap
+  is four fifths full, **every** tool result says so, with the numbers and the suggestion to
+  save and restart with a larger `-Xmx` (a non-axis-aligned wire is the one thing that exhausts
+  the heap by itself, and the message says where to look);
+* a call that took five seconds or more explains that this is what a large circuit costs, and
+  what to do instead (batch the work with `logisim_wire_add`'s `paths` or
+  `logisim_component_add_many`, one undo step per intention);
+* a **mutating** call on a circuit with more than 400 components or 800 wires warns before the
+  next one, naming the counts. Verified on a 452 component circuit, where the warning arrived
+  appended to the tool's own hint.
+
+The advice is a courtesy and never changes a result: it is added only when the call succeeded,
+and the check that produces it can never fail a call.
 
 ## Damaged files, hangs and "Java heap space"
 

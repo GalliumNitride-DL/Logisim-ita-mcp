@@ -27,7 +27,9 @@ import com.cburch.logisim.mcp.tools.FileTools;
 import com.cburch.logisim.mcp.tools.GuiTools;
 import com.cburch.logisim.mcp.tools.ImageTools;
 import com.cburch.logisim.mcp.tools.LintTools;
+import com.cburch.logisim.mcp.tools.MemoryTools;
 import com.cburch.logisim.mcp.tools.NetTools;
+import com.cburch.logisim.mcp.tools.SelfTools;
 import com.cburch.logisim.mcp.tools.SessionTools;
 import com.cburch.logisim.mcp.tools.SimTools;
 
@@ -441,7 +443,12 @@ public final class McpMain {
 		}
 	}
 
-	private static ToolRegistry registry(McpSession session, String transportDescription) {
+	/**
+	 * The whole tool set for one session. Package private because {@link SelfTest} builds a
+	 * registry for its own scratch session, so that it drives exactly the tools an agent
+	 * drives rather than a private copy of the same logic.
+	 */
+	static ToolRegistry registry(McpSession session, String transportDescription) {
 		ToolRegistry registry = new ToolRegistry();
 		registry.register(SessionTools.status(session, transportDescription, registry));
 		registry.register(SessionTools.undo(session));
@@ -459,6 +466,8 @@ public final class McpMain {
 		registry.register(CatalogTools.componentCatalog(session));
 		// not tied to a session: the manual can be read before anything is opened
 		registry.register(DocTools.help());
+		// likewise: the self test drives a session of its own
+		registry.register(SelfTools.selfTest());
 
 		registry.register(CircuitTools.list(session));
 		registry.register(CircuitTools.describe(session));
@@ -478,6 +487,7 @@ public final class McpMain {
 		registry.register(EditTools.setAttributes(session));
 		registry.register(EditTools.addWire(session));
 		registry.register(EditTools.removeWire(session));
+		registry.register(MemoryTools.memory(session));
 
 		registry.register(SimTools.reset(session));
 		registry.register(SimTools.setInput(session));
@@ -486,6 +496,7 @@ public final class McpMain {
 		registry.register(SimTools.readAll(session));
 		registry.register(SimTools.propagate(session));
 		registry.register(SimTools.tick(session));
+		registry.register(SimTools.trace(session));
 		registry.register(SimTools.status(session));
 		registry.register(SimTools.runVectors(session));
 

@@ -230,8 +230,9 @@ public class McpServer {
 		try {
 			long started = System.currentTimeMillis();
 			JsonElement result = session.isLive() ? EdtGate.call(body, EdtGate.DEFAULT_TIMEOUT_MS, name) : body.call();
-			ActivityLog.record(name + " ok (" + (System.currentTimeMillis() - started) + " ms)");
-			return toolResult(result);
+			long elapsed = System.currentTimeMillis() - started;
+			ActivityLog.record(name + " ok (" + elapsed + " ms)");
+			return toolResult(withHint(result, adviceFor(session, name, elapsed)));
 		} catch (Throwable t) {
 			if (!(t instanceof McpException)) {
 				log.println("[logisim-mcp] tool " + name + " failed: " + t);
@@ -241,6 +242,51 @@ public class McpServer {
 					+ (t instanceof McpException ? t.getMessage() : McpSession.message(t)));
 			return errorResult(t);
 		}
+	}
+
+	/** A call that took at least this long is worth explaining, since the cause is its size. */
+	private static final long SLOW_CALL_MS = 5000;
+
+	/** Above these counts a circuit is worth warning about: every edit repairs all its wires. */
+	private static final int LARGE_CIRCUIT_COMPONENTS = 400;
+	private static final int LARGE_CIRCUIT_WIRES = 800;
+
+	/**
+	 * One line of advice about the session as a whole, or null when there is nothing to say.
+	 * The three cases are the ones an agent cannot see for itself: the heap is nearly full, a
+	 * call took long enough that the circuit's size is now the problem, and the circuit is
+	 * large enough that the next edit will be slow because Logisim repairs the wiring of the
+	 * whole circuit on every transaction.
+	 */
+	private static String adviceFor(McpSession session, String tool, long elapsedMs) {
+		String heap = McpSession.heapWarning();
+		if (heap != null) {
+			return heap;
+		}
+		if (elapsedMs >= SLOW_CALL_MS) {
+			return "this call took " + elapsedMs + " ms, which is what a large circuit costs - Logisim repairs "
+					+ "the wiring of the whole circuit on every edit, so prefer one batched logisim_wire_add "
+					+ "('paths') or logisim_component_add_many, and give the server a larger -Xmx before the "
+					+ "circuit grows further";
+		}
+		if (!ToolRegistry.isMutating(tool) || !session.isOpen()) {
+			return null;
+		}
+		try {
+			com.cburch.logisim.circuit.Circuit circuit = session.circuit();
+			int components = circuit.getNonWires().size();
+			int wires = circuit.getWires().size();
+			if (components > LARGE_CIRCUIT_COMPONENTS || wires > LARGE_CIRCUIT_WIRES) {
+				return "circuit '" + circuit.getName() + "' has " + components + " components and " + wires
+						+ " wires, and Logisim repairs every wire of a circuit on every edit: batch the work "
+						+ "(logisim_wire_add 'paths', logisim_component_add_many) and keep one undo step per "
+						+ "intention, or an edit that used to be instant will start taking seconds";
+			}
+		} catch (Throwable t) {
+			// the advice is a courtesy: never let it turn a good call into a failure
+			return null;
+		}
+		return null;
 	}
 
 	/**

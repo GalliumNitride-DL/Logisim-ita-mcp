@@ -76,7 +76,10 @@ public final class McpInstructions {
 			+ "logisim_file_save_as to write the repaired file.\n"
 			+ "6. Check logisim_status before long builds and before saving: it reports heap usage under 'memory', "
 			+ "'last_wire_repair', and which circuit is current. logisim_circuit_describe reports "
-			+ "'skewed_wire_count' and marks each bad wire 'broken'. Save early, and keep circuits modest.\n"
+			+ "'skewed_wire_count' and marks each bad wire 'broken'. Save early, and keep circuits modest. A call "
+			+ "that took seconds, a heap that is filling up, or a circuit large enough that the next edit will be "
+			+ "slow all say so in the result's 'hint': act on it by batching the remaining edits, saving, and asking "
+			+ "the user for a larger -Xmx before the circuit grows further.\n"
 			+ "7. Verify electrically after wiring: logisim_sim_propagate then logisim_sim_read_all. A net that "
 			+ "reads 'x' (undriven, floating) or 'e' (error, conflicting drivers) usually means a wire endpoint "
 			+ "missed a port, or two nets got joined. Component placement does not connect anything: a connection "
@@ -501,5 +504,45 @@ public final class McpInstructions {
 
 	public static final String SIM_STATUS = "Reports how the simulation of a circuit currently stands: how many clock cycles have elapsed, "
 					+ "whether the circuit is oscillating (never settling), and the current pin values.";
+
+	public static final String SIM_TRACE = "Records signals over several clock cycles and returns a table: one row per cycle, one column per "
+			+ "watched signal. This is how a sequential circuit is actually verified - a flip-flop, a counter, a "
+			+ "shift register, a program counter, a state machine - because a single reading cannot show a sequence. "
+			+ "'signals' names the signals to watch, and defaults to every pin: a pin label (\"Q\"), a port "
+			+ "reference (\"c3.1\", \"c3.Q\") or an \"x,y\" location, the same forms logisim_wire_add "
+			+ "accepts. 'cycles' is how "
+			+ "many clock edges to run (default 8, so the row 'cycle: 8' is the state after eight edges); 'only_changes' "
+			+ "drops the rows in which nothing changed, which turns a long settled run into the few transitions that "
+			+ "matter. Cells are bit patterns (0, 1, x unknown, e error) unless 'radix' asks for 'hex', 'dec' or "
+			+ "'signed'. Cycle 0 is the state before the first edge. Use logisim_sim_tick instead when only the final "
+			+ "values matter.";
+
+	public static final String COMPONENT_MEMORY = "Reads or writes the contents of a memory component - a ROM or a RAM - which is what a CPU "
+			+ "design needs before it can run at all: a program in a ROM, or code and data loaded into a RAM. "
+			+ "'action' is 'read' (the default), 'write' or 'clear'. A read returns a range of words starting at 'from' "
+			+ "(default 0), at most 'limit' of them (default 64), and says how many the memory holds in total. A write "
+			+ "takes 'words' (a list, starting at 'from'), 'values' (address to value) or 'fill' (one value for every "
+			+ "address), and 'dry_run' validates without changing anything. Addresses are word addresses, decimal or "
+			+ "0x-prefixed; values accept decimal, 0x hex and 0b binary and must fit the memory's data width - a value "
+			+ "that does not fit is refused rather than truncated. The two memory types differ in where the contents "
+			+ "live, and the result says which happened: a ROM keeps them in the component, so writing is an ordinary "
+			+ "undoable edit that Logisim saves with the file, while a RAM keeps them in the simulation state, so a "
+			+ "write takes effect at once, is not an undo step, and is NOT saved - opening the saved file starts the "
+			+ "RAM empty again. A program that has to survive therefore belongs in a ROM; a RAM is for values the "
+			+ "running circuit computes.";
+
+	public static final String SELF_TEST = "Checks that this server works in this build and in this packaging, and returns one line per check "
+			+ "with 'ok' and, when something is wrong, the detail needed to see why. It builds a small circuit of its "
+			+ "own in a scratch project and drives it through the same tools an agent uses: place and wire, a dry run, "
+			+ "simulation vectors, the truth table and the minimized expression, the netlist, the lint, a save and "
+			+ "reopen, the recovery of a deliberately damaged file, and the bundled manual. Nothing of the session's "
+			+ "own project is touched, changed, saved or closed, so it is safe to call at any time, including with a "
+			+ "window open; what it writes goes to the system temp directory and is deleted unless 'keep_files' is "
+			+ "true. Use it after building or packaging the server - a jar or exe that has lost its 'doc' folder can "
+			+ "only fail the 'docs' check - and when a tool behaves inexplicably. 'checks' runs a subset by name, and "
+			+ "'verbose' also returns the checks that passed. The checks are named: tools, catalogue, build, guard, "
+			+ "dry_run, simulate, nets, analysis, lint, memory, trace, save/load, recover, docs. A check whose turn "
+			+ "has not come yet builds what it needs first, so a subset works: 'checks': [\"simulate\"] builds the "
+			+ "adder and runs its vectors.";
 
 }

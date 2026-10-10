@@ -57,6 +57,15 @@ public final class EditTools {
 	private static final int GRID_WARN = 1;
 	private static final int GRID_ALLOW = 2;
 
+	/** How far either side of an obstacle the route search may place a lane, in grid steps. */
+	private static final int SEARCH_REACH = 2;
+
+	/** The most lanes the route search will consider on each axis, so that it stays bounded. */
+	private static final int MAX_SEARCH_LANES = 24;
+
+	/** What one corner costs the route search, in pixels of detour: fewer corners win. */
+	private static final int CORNER_COST = 30;
+
 	private EditTools() {
 	}
 
@@ -1147,9 +1156,11 @@ public final class EditTools {
 	 * A corner is inserted automatically, but only where it is harmless: a wire that
 	 * ran along the far side of a component would pass straight through that
 	 * component's other ports, and because Logisim splits a wire wherever another
-	 * component has a port, such a route silently short circuits the ports together.
+	 * component has a port, such a route silently short circuits the ports together. A
+	 * corner that landed exactly on a port would do the same, so that is refused as well.
 	 * So the two single corner routes are tried, then Z shaped routes through lanes
-	 * that are clear of every port, and only if none of those work does the agent get
+	 * that are clear of every port, then the coordinate search of
+	 * {@link #routeBySearch}, and only if none of those work does the agent get
 	 * asked for an explicit route. A broken circuit is never produced silently.
 	 * </p>
 	 */
@@ -1177,7 +1188,8 @@ public final class EditTools {
 		}
 		Location[] corners = { Location.create(b.getX(), a.getY()), Location.create(a.getX(), b.getY()) };
 		for (Location corner : corners) {
-			if (clear(a, corner, ports, existing, planned) && clear(corner, b, ports, existing, planned)) {
+			if (cornerAllowed(corner, ports) && clear(a, corner, ports, existing, planned)
+					&& clear(corner, b, ports, existing, planned)) {
 				planned.add(Wire.create(a, corner));
 				planned.add(Wire.create(corner, b));
 				mid.add(corner);
@@ -1187,8 +1199,8 @@ public final class EditTools {
 		for (int lane : laneCandidates(ports, a, b)) {
 			Location p1 = Location.create(lane, a.getY());
 			Location p2 = Location.create(lane, b.getY());
-			if (clear(a, p1, ports, existing, planned) && clear(p1, p2, ports, existing, planned)
-					&& clear(p2, b, ports, existing, planned)) {
+			if (cornerAllowed(p1, ports) && cornerAllowed(p2, ports) && clear(a, p1, ports, existing, planned)
+					&& clear(p1, p2, ports, existing, planned) && clear(p2, b, ports, existing, planned)) {
 				planned.add(Wire.create(a, p1));
 				planned.add(Wire.create(p1, p2));
 				planned.add(Wire.create(p2, b));
@@ -1198,8 +1210,8 @@ public final class EditTools {
 			}
 			Location q1 = Location.create(a.getX(), lane);
 			Location q2 = Location.create(b.getX(), lane);
-			if (clear(a, q1, ports, existing, planned) && clear(q1, q2, ports, existing, planned)
-					&& clear(q2, b, ports, existing, planned)) {
+			if (cornerAllowed(q1, ports) && cornerAllowed(q2, ports) && clear(a, q1, ports, existing, planned)
+					&& clear(q1, q2, ports, existing, planned) && clear(q2, b, ports, existing, planned)) {
 				planned.add(Wire.create(a, q1));
 				planned.add(Wire.create(q1, q2));
 				planned.add(Wire.create(q2, b));
@@ -1208,11 +1220,245 @@ public final class EditTools {
 				return mid;
 			}
 		}
+		List<Location> searched = routeBySearch(a, b, ports, existing, planned);
+		if (searched != null) {
+			return searched;
+		}
 		throw new McpException("cannot route from " + a + " to " + b + " without either running through a "
 				+ "component port or overlapping an existing wire (both of which would connect them); give an "
 				+ "explicit 'points' list with a steering point, for example [[" + a.getX() + "," + a.getY()
 				+ "],[" + (a.getX() + 20) + "," + a.getY() + "],[" + (a.getX() + 20) + "," + b.getY() + "],["
 				+ b.getX() + "," + b.getY() + "]]");
+	}
+
+	/** One step of the route search: a node entered along one direction, priced by g + h. */
+	private static final class SearchStep implements Comparable<SearchStep> {
+		final int state;
+		final double cost;
+		final double priority;
+
+		SearchStep(int state, double cost, double priority) {
+			this.state = state;
+			this.cost = cost;
+			this.priority = priority;
+		}
+
+		@Override
+		public int compareTo(SearchStep other) {
+			return Double.compare(priority, other.priority);
+		}
+	}
+
+	/**
+	 * A shortest route over the grid of interesting coordinates: the two ends, and every
+	 * coordinate one or two grid steps either side of a port and of an existing wire end. A
+	 * straight run costs its length and a corner costs a little more, so the answer is the
+	 * route a person would draw. It is a fallback: the two single corners and the Z lanes get
+	 * their chance first, and this runs only where neither of those can pass - which is exactly
+	 * the densely wired circuit where eight fixed lanes are not enough. It returns null when
+	 * even the search finds nothing, so the caller still reports the pair as unroutable rather
+	 * than drawing something that would short two nets together.
+	 *
+	 * <p>
+	 * The search is bounded on purpose: at most {@link #MAX_SEARCH_LANES} lanes per axis, and
+	 * each step only reaches the next lane, so a large circuit costs a bounded amount of work
+	 * instead of an unbounded one.
+	 * </p>
+	 */
+	private static List<Location> routeBySearch(Location a, Location b, java.util.Set<Location> ports,
+			java.util.Set<Wire> existing, List<Wire> planned) {
+		int[] xs = lanesFor(a, b, true, ports, existing);
+		int[] ys = lanesFor(a, b, false, ports, existing);
+		int nx = xs.length;
+		int ny = ys.length;
+		if (nx < 2 || ny < 2) {
+			return null;
+		}
+		int startX = java.util.Arrays.binarySearch(xs, a.getX());
+		int startY = java.util.Arrays.binarySearch(ys, a.getY());
+		int goalX = java.util.Arrays.binarySearch(xs, b.getX());
+		int goalY = java.util.Arrays.binarySearch(ys, b.getY());
+		if (startX < 0 || startY < 0 || goalX < 0 || goalY < 0) {
+			return null;
+		}
+		Location[] nodes = new Location[nx * ny];
+		for (int iy = 0; iy < ny; iy++) {
+			for (int ix = 0; ix < nx; ix++) {
+				nodes[iy * nx + ix] = Location.create(xs[ix], ys[iy]);
+			}
+		}
+		// a node reached along x and the same node reached along y are different states, which
+		// is what lets a corner be priced
+		int states = nx * ny * 2;
+		double[] best = new double[states];
+		java.util.Arrays.fill(best, Double.MAX_VALUE);
+		int[] cameFrom = new int[states];
+		java.util.Arrays.fill(cameFrom, -1);
+		int start = (startY * nx + startX) * 2;
+		int goalA = (goalY * nx + goalX) * 2;
+		int goalB = goalA + 1;
+		java.util.PriorityQueue<SearchStep> queue = new java.util.PriorityQueue<SearchStep>();
+		for (int direction = 0; direction < 2; direction++) {
+			best[start + direction] = 0;
+			queue.add(new SearchStep(start + direction, 0, remaining(xs, ys, startX, startY, b)));
+		}
+		int end = -1;
+		while (!queue.isEmpty()) {
+			SearchStep step = queue.poll();
+			if (step.cost > best[step.state] + 1e-6) {
+				continue; // a cheaper way of reaching this state was found after this entry was queued
+			}
+			int state = step.state;
+			if (state == goalA || state == goalB) {
+				end = state;
+				break;
+			}
+			int ix = (state / 2) % nx;
+			int iy = (state / 2) / nx;
+			int direction = state % 2;
+			for (int move = 0; move < 4; move++) {
+				int jx = ix + (move == 0 ? 1 : move == 1 ? -1 : 0);
+				int jy = iy + (move == 2 ? 1 : move == 3 ? -1 : 0);
+				if (jx < 0 || jx >= nx || jy < 0 || jy >= ny) {
+					continue;
+				}
+				Location from = nodes[iy * nx + ix];
+				Location to = nodes[jy * nx + jx];
+				// a corner that landed on a port would join that port to this net, which is the
+				// accident the whole router exists to avoid
+				if (!(jx == goalX && jy == goalY) && ports.contains(to)) {
+					continue;
+				}
+				if (!clear(from, to, ports, existing, planned)) {
+					continue;
+				}
+				int nextDirection = move < 2 ? 0 : 1;
+				int nextState = (jy * nx + jx) * 2 + nextDirection;
+				double cost = best[state] + from.manhattanDistanceTo(to)
+						+ (nextDirection == direction ? 0 : CORNER_COST);
+				if (cost < best[nextState]) {
+					best[nextState] = cost;
+					cameFrom[nextState] = state;
+					queue.add(new SearchStep(nextState, cost, cost + remaining(xs, ys, jx, jy, b)));
+				}
+			}
+		}
+		if (end < 0) {
+			return null;
+		}
+		java.util.List<Location> path = new ArrayList<Location>();
+		for (int state = end; state >= 0; state = cameFrom[state]) {
+			path.add(nodes[state / 2]);
+		}
+		java.util.Collections.reverse(path);
+		// The search walks lane by lane, so straight runs arrive as many steps of one grid
+		// apart. Collapsing them keeps the answer the one a person would draw (and the wire
+		// ids meaningful: Logisim merges collinear wires as it commits, so the ids of the
+		// steps would not exist afterwards).
+		List<Location> corners = new ArrayList<Location>();
+		corners.add(path.get(0));
+		for (int i = 1; i + 1 < path.size(); i++) {
+			Location previous = corners.get(corners.size() - 1);
+			Location current = path.get(i);
+			Location next = path.get(i + 1);
+			boolean straight = previous.getX() == current.getX() && current.getX() == next.getX();
+			boolean level = previous.getY() == current.getY() && current.getY() == next.getY();
+			if (!straight && !level) {
+				corners.add(current);
+			}
+		}
+		corners.add(path.get(path.size() - 1));
+		List<Location> mid = new ArrayList<Location>();
+		for (int i = 1; i + 1 < corners.size(); i++) {
+			mid.add(corners.get(i));
+		}
+		for (int i = 0; i + 1 < corners.size(); i++) {
+			planned.add(Wire.create(corners.get(i), corners.get(i + 1)));
+		}
+		return mid;
+	}
+
+	/** Manhattan distance left to the far end: an admissible and consistent estimate. */
+	private static double remaining(int[] xs, int[] ys, int ix, int iy, Location goal) {
+		return Math.abs(xs[ix] - goal.getX()) + Math.abs(ys[iy] - goal.getY());
+	}
+
+	/**
+	 * The coordinate values the search may put a lane on along one axis: the two ends of the
+	 * stretch being routed, and one or two grid steps either side of every port and every
+	 * existing wire end. Negative values are left out because the canvas starts at the origin,
+	 * and when a circuit offers more lanes than the search will consider, the ones nearest the
+	 * stretch win - the two ends are always kept.
+	 */
+	private static int[] lanesFor(Location a, Location b, boolean xAxis, java.util.Set<Location> ports,
+			java.util.Set<Wire> existing) {
+		int from = xAxis ? a.getX() : a.getY();
+		int to = xAxis ? b.getX() : b.getY();
+		java.util.TreeSet<Integer> values = new java.util.TreeSet<Integer>();
+		addLane(values, from);
+		addLane(values, to);
+		for (Location port : ports) {
+			int value = xAxis ? port.getX() : port.getY();
+			for (int step = 1; step <= SEARCH_REACH; step++) {
+				addLane(values, value + step * GRID);
+				addLane(values, value - step * GRID);
+			}
+		}
+		for (Wire wire : existing) {
+			for (int end = 0; end < 2; end++) {
+				Location point = end == 0 ? wire.getEnd0() : wire.getEnd1();
+				int value = xAxis ? point.getX() : point.getY();
+				for (int step = 1; step <= SEARCH_REACH; step++) {
+					addLane(values, value + step * GRID);
+					addLane(values, value - step * GRID);
+				}
+			}
+		}
+		if (values.size() > MAX_SEARCH_LANES) {
+			int[] sorted = new int[values.size()];
+			int index = 0;
+			for (Integer value : values) {
+				sorted[index++] = value.intValue();
+			}
+			int centre = (from + to) / 2;
+			int nearest = 0;
+			for (int i = 1; i < sorted.length; i++) {
+				if (Math.abs(sorted[i] - centre) < Math.abs(sorted[nearest] - centre)) {
+					nearest = i;
+				}
+			}
+			int begin = Math.max(0, Math.min(sorted.length - MAX_SEARCH_LANES, nearest - MAX_SEARCH_LANES / 2));
+			java.util.TreeSet<Integer> window = new java.util.TreeSet<Integer>();
+			for (int i = begin; i < begin + MAX_SEARCH_LANES; i++) {
+				window.add(Integer.valueOf(sorted[i]));
+			}
+			values = window;
+		}
+		values.add(Integer.valueOf(from));
+		values.add(Integer.valueOf(to));
+		int[] ret = new int[values.size()];
+		int index = 0;
+		for (Integer value : values) {
+			ret[index++] = value.intValue();
+		}
+		return ret;
+	}
+
+	/** Adds a lane, keeping every coordinate on the visible canvas and on the grid. */
+	private static void addLane(java.util.TreeSet<Integer> values, int value) {
+		if (value >= 0) {
+			values.add(Integer.valueOf(value));
+		}
+	}
+
+	/**
+	 * True when a point may hold a corner of a route. A corner is an end of two wire segments, and
+	 * an end that lands on a port connects that port to the net - silently, and to a component the
+	 * caller never mentioned. That is the accident the router exists to prevent, so such a corner is
+	 * refused and the route goes around instead.
+	 */
+	private static boolean cornerAllowed(Location point, java.util.Set<Location> ports) {
+		return !ports.contains(point);
 	}
 
 	/**

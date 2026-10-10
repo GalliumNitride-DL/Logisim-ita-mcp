@@ -1043,15 +1043,44 @@ public class McpSession implements Closeable {
 		long total = runtime.totalMemory();
 		long free = runtime.freeMemory();
 		long max = runtime.maxMemory();
+		long used = total - free;
 		JsonObject ret = new JsonObject();
-		ret.addProperty("heap_used_bytes", Long.valueOf(total - free));
+		ret.addProperty("heap_used_bytes", Long.valueOf(used));
 		ret.addProperty("heap_total_bytes", Long.valueOf(total));
 		ret.addProperty("heap_max_bytes", Long.valueOf(max));
-		ret.addProperty("heap_used_mb", Long.valueOf((total - free) / (1024L * 1024L)));
+		ret.addProperty("heap_used_mb", Long.valueOf(used / (1024L * 1024L)));
 		ret.addProperty("heap_max_mb", Long.valueOf(max / (1024L * 1024L)));
-		ret.addProperty("hint", "pass -Xmx to the server if a large circuit needs more room; a "
-				+ "non-axis-aligned wire makes every edit exhaust the heap (see logisim_circuit_repair_wires)");
+		ret.addProperty("heap_used_percent", Long.valueOf(max <= 0 ? 0 : used * 100 / max));
+		ret.addProperty("heap_pressure", Boolean.valueOf(max > 0 && used > max * HEAP_PRESSURE_NUMERATOR
+				/ HEAP_PRESSURE_DENOMINATOR));
+		ret.addProperty("hint", used > max * HEAP_PRESSURE_NUMERATOR / HEAP_PRESSURE_DENOMINATOR
+				? "the heap is nearly full: save the work, then restart the server with a larger -Xmx (for example "
+						+ "-Xmx2g)"
+				: "pass -Xmx to the server if a large circuit needs more room; a non-axis-aligned wire makes every "
+						+ "edit exhaust the heap (see logisim_circuit_repair_wires)");
 		return ret;
+	}
+
+	/** The fraction of the heap at which a call starts saying that room is running out. */
+	private static final long HEAP_PRESSURE_NUMERATOR = 4;
+	private static final long HEAP_PRESSURE_DENOMINATOR = 5;
+
+	/**
+	 * One line saying that the heap is nearly full, or null while there is room. Every tool
+	 * result carries it, because the moment a call is in trouble is the moment an agent can
+	 * still do something about it - save, stop, and ask for a bigger -Xmx.
+	 */
+	public static String heapWarning() {
+		Runtime runtime = Runtime.getRuntime();
+		long max = runtime.maxMemory();
+		long used = runtime.totalMemory() - runtime.freeMemory();
+		if (max <= 0 || used * HEAP_PRESSURE_DENOMINATOR <= max * HEAP_PRESSURE_NUMERATOR) {
+			return null;
+		}
+		return "the Java heap is " + (used * 100 / max) + "% full (" + (used / (1024L * 1024L)) + " of "
+				+ (max / (1024L * 1024L)) + " MB): save the work now, and restart the server with a larger -Xmx "
+				+ "(for example -Xmx2g) before building more. A non-axis-aligned wire is the one thing that "
+				+ "exhausts the heap on its own (see logisim_circuit_repair_wires)";
 	}
 
 	/** Every location at which a non-wire component has a port. */
@@ -1154,7 +1183,14 @@ public class McpSession implements Closeable {
 		if (found != null && circuit.contains(found)) {
 			return found;
 		}
-		return null;
+		// A project that has only just been opened has no ids yet, and an agent that
+		// reads a file and then names a component ("c1") would be told it does not
+		// exist. Handing out the ids is harmless - a component that already has one
+		// keeps it - and it uses the same order logisim_circuit_describe reports, so
+		// the id an agent saw in one reply still names the same component in the next.
+		indexComponents(circuit);
+		Component retry = byId.get(id);
+		return retry != null && circuit.contains(retry) ? retry : null;
 	}
 
 	private Component findByLabel(Circuit circuit, String label) {
