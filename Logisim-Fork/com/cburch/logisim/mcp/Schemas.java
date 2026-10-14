@@ -109,9 +109,7 @@ public final class Schemas {
 		JsonObject ret = new JsonObject();
 		ret.addProperty("type", "array");
 		ret.addProperty("description", description);
-		JsonArray items = new JsonArray();
-		items.add(type("integer", "coordinate"));
-		ret.add("items", items);
+		ret.add("items", type("integer", "coordinate"));
 		ret.addProperty("minItems", 2);
 		ret.addProperty("maxItems", 2);
 		return ret;
