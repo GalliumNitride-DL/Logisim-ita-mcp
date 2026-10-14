@@ -84,7 +84,12 @@ public final class GuiTools {
 						if (project.getCurrentCircuit() != null) {
 							current.addProperty("circuit", project.getCurrentCircuit().getName());
 						}
-						List<String> selected = GuiBridge.selection(session, project);
+						current.addProperty("view", GuiBridge.view(focused));
+						boolean appearanceView = Frame.EDIT_APPEARANCE.equals(focused.getEditorView());
+						List<String> selected = appearanceView
+								? GuiBridge.appearanceSelection(project)
+								: GuiBridge.selection(session, project);
+						current.addProperty("selection_of", appearanceView ? "appearance" : "circuit");
 						current.addProperty("selection_count", selected.size());
 						if (!selected.isEmpty()) {
 							JsonArray items = new JsonArray();
@@ -151,6 +156,7 @@ public final class GuiTools {
 				if (project.getCurrentCircuit() != null) {
 					ret.addProperty("circuit", project.getCurrentCircuit().getName());
 				}
+				ret.addProperty("view", GuiBridge.view(frame));
 				return ret;
 			}
 		};
@@ -180,6 +186,14 @@ public final class GuiTools {
 					ids.add(session.idOf(comp));
 				}
 				ret.add("selection", ids);
+				Frame frame = GuiBridge.frameFor(project);
+				boolean onScreen = frame == null || !Frame.EDIT_APPEARANCE.equals(frame.getEditorView());
+				ret.addProperty("visible", Boolean.valueOf(onScreen));
+				if (!onScreen) {
+					ret.addProperty("hint", "this window is showing an appearance (a symbol), so the highlight is on "
+							+ "the circuit canvas behind it and the user cannot see it: logisim_circuit_select puts the "
+							+ "window back on the schematic");
+				}
 				return ret;
 			}
 		};

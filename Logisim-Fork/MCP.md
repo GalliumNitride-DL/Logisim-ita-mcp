@@ -35,6 +35,7 @@ java -jar Logisim.jar -mcp --transport tcp --port 7331
 | Memory | `logisim_component_memory` |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
 | Picture | `logisim_screenshot` |
+| Symbols | `logisim_circuit_appearance`, `logisim_circuit_appearance_edit` |
 | Repair | `logisim_circuit_repair_wires` |
 | Self test | `logisim_self_test` |
 
@@ -130,6 +131,77 @@ One thing it cannot do is tell you what is *connected*: a wire that crosses anot
 exactly like a wire that joins it, with the difference visible only at the junction dot.
 Use `logisim_circuit_nets` for the electrical answer and the picture for the layout.
 
+With `appearance: true` the same tool draws a circuit's **symbol** rather than its contents:
+the shapes and text of the appearance, the grey rectangle an instance of it occupies in a
+parent, and each port with its Pin's label written beside it - the last only where the symbol
+does not already carry that name as a text shape, so a symbol arranged with `label_ports`
+shows each name once. That is how an agent looks at what the user will see when the circuit is
+placed, without a window.
+
+### The symbol of a subcircuit: `logisim_circuit_appearance`
+
+A circuit used as a component is drawn as its **appearance**: a box to label, ports where
+the wires attach, and whatever else the author drew. Reading and changing it was the last
+part of a design the layer could not reach - the agent could build a correct subcircuit and
+still hand back something the user could not use, with ports landing on top of its own
+label.
+
+* `logisim_circuit_appearance` reports the anchor, whether Logisim is still laying the
+  symbol out by itself (`is_default`), the bounding box, the rectangle an instance takes in
+  a parent (`instance_bounds`), every port in **instance order** - which is what `"U1.0"`
+  and `"U1.1"` refer to - and every shape with the id the editing tool uses for it
+  (`a1`, `a2`, ...).
+* `logisim_circuit_appearance_edit` moves ports (by Pin label), moves, adds and removes
+  shapes, changes a text shape's text, and hands the symbol back to Logisim's own layout
+  with `reset: true` - the same thing the GUI's "Revert Appearance" does.
+
+Three decisions are worth knowing about.
+
+* **One tool, not one per shape.** The circuit tools are separate calls because each one is
+a different verb on a different kind of object; an appearance is arranged in one pass or not
+at all, and the shapes are all the same kind of thing - the agent writes a list of moves and
+a list of shapes, and Logisim applies them in one go.
+* **One call is one undo step.** The actions are joined with `Action.append`, so however many
+shapes a call touched, the Edit menu shows one entry and one `logisim_undo` takes the lot
+back. `logisim_component_add_many` makes the same promise for the same reason.
+* **The tool answers with the symbol, not a summary of it.** The reply carries the object
+list back, so an agent that has just moved a port can see where it landed, and a screenshot
+with `appearance: true` shows the same thing as a picture.
+
+Ports cannot be added or removed by this tool: a port exists because a Pin exists. Removing a
+Pin removes its port, which is what keeps the two in step. Adding or removing one is refused
+with a message that says so.
+
+**A port is where its Pin sits in every instance of the circuit**, at the symbol's port
+position offset by the instance's anchor, and two consequences of moving one are reported
+rather than left to be discovered in a parent that no longer works:
+
+* the wires of the parent circuits are **not** moved with it, so `parent_wiring` names each
+instance, the point the wires still end at, and the point the port went to. Moving a port can
+also renumber the ports of an instance, because a port's number follows its position in the
+symbol (left to right, then top to bottom), and `port_order_before`/`port_order_after` say so
+when that happens - anything wired as `"U1.3"` then means something else.
+* the first edit of a symbol Logisim was still laying out **freezes** that arrangement, and
+`frozen_note` says so: the box and the notch Logisim drew round the automatic ports are
+ordinary shapes from then on, left where they stood, so they stay behind if the ports move
+away from them.
+
+`label_ports: true` writes each port's Pin label into the symbol as a text shape, just inside
+the side the port sits on - inside because the wire a parent draws arrives from outside, and
+because a name outside would widen the symbol and so change the rectangle every instance of it
+occupies. A name already written is left alone, so asking twice adds nothing; that check is by
+name rather than by position, because an unpainted text shape reports no size to compare.
+
+In live mode the user's window is switched to this circuit's **appearance view** when a call
+changes it, so the arrangement appears where it is happening rather than in a schematic that
+looks unchanged. That is deliberate, and it is the one place where a call moves the user's
+view away from the schematic.
+
+The drawing follows Logisim's own: a new line is a two point open `Poly`, exactly what the
+GUI's line tool draws, because Logisim's older `Line` shape cannot paint itself without a drag
+gesture and would fail in any picture drawn without one. A shape that refuses to draw anyway
+is skipped and named in `unpaintable` rather than losing the whole picture.
+
 ### Building in bulk: `logisim_component_add_many` and `logisim_component_duplicate`
 
 One call per component is how a 70-component circuit becomes 70 replies, each with an
@@ -186,21 +258,29 @@ first edge and then the alternation, which is the check the self test pins it wi
 ### Is this server working? `logisim_self_test`
 
 Every failure this project has had was found by hand, with a throwaway script in the temp
-folder. `logisim_self_test` is that idea kept where it can run again: one call, fourteen
+folder. `logisim_self_test` is that idea kept where it can run again: one call, eighteen
 checks, about a second, and a one line answer per check with `ok` and the detail needed to see
 why not. It builds a small circuit of its own in a **second session**, so nothing of the open
 project is touched, changed, saved or closed - which is why it is safe to call at any moment,
 including in live mode with unsaved work on screen.
 
 The checks are `tools`, `catalogue`, `build`, `guard`, `dry_run`, `simulate`, `nets`,
-`analysis`, `lint`, `memory`, `trace`, `save/load`, `recover` and `docs`. Between them they pin
-the things that were once wrong and could go wrong again: that a Splitter reports five named
-ports, that the Adder's Carry Out still comes back as an `output` with its `direction_note`,
-that a negative coordinate, an off grid position and a circuit placed inside itself are all
-refused, that a dry run changes nothing, that an 8-bit adder adds with the right carry, that
-the carry net still has exactly one driver, that the truth table and the minimised expression
-agree with the circuit, that a deliberately wrong circuit is linted, that a ROM write survives
-an undo, that a flip-flop's trace changes over cycles, that a project survives a save and
+`analysis`, `lint`, `memory`, `trace`, `sim_determinism`, `wiring`, `splitter`, `appearance`,
+`save/load`, `recover` and
+`docs`. Between
+them they pin the things that were once wrong and could go wrong again: that a Splitter reports
+five named ports, that the Adder's Carry Out still comes back as an `output` with its
+`direction_note`, that a negative coordinate, an off grid position and a circuit placed inside
+itself are all refused, that a dry run changes nothing, that an 8-bit adder adds with the right
+carry, that the carry net still has exactly one driver, that the truth table and the minimised
+expression agree with the circuit, that a deliberately wrong circuit is linted, that a ROM
+write survives an undo, that a flip-flop's trace changes over cycles, that a simulator left
+running is stopped for the call and that one vector which cannot be evaluated costs a row
+rather than the whole batch, that a branch into a trunk drawn by the same call is a join rather
+than an endpoint that connects nothing, that a splitter really splits 5/27 when asked, that a symbol's ports
+still come back in instance order and that arranging one and undoing it once puts the automatic
+layout back, with each port's name written just inside it and a second `label_ports` call adding
+nothing, that a project survives a save and
 reopen, that a file containing a wire Logisim cannot iterate is refused by `file_open` and
 rescued by `file_recover` - the one branch of that tool which had never been exercised - and
 that the bundled manual can still be read (which a jar that lost its `doc` folder cannot do).
@@ -211,6 +291,23 @@ check builds whatever it needs first, so a subset works on its own. When this ro
 written the test immediately found a defect in its own trace fixture (the D input of a
 flip-flop has no name in Logisim, so the fixture had wired the complement to the *output*),
 which is exactly what it is for.
+
+### Attributes that rebuild themselves
+
+A Splitter is the one component whose attributes depend on each other: `incoming` and `fanout`
+decide which per-bit attributes exist (`bit0`, `bit1`, …), so setting those before the shape - or
+setting them on the attribute set before the component exists - left Logisim's own default in
+place. A caller asking for a 5/27 split got an even 16/16, or an 11/11/10, with nothing said. Two
+things follow from that and are now done:
+
+* the shape goes first and the bits are applied to the component itself, before it enters the
+  circuit, so `{"incoming": 32, "fanout": 2, "bit_ranges": {"0-4": 0, "5-31": 1}}` really is
+  5/27 in one call and one undo step (`bit_ranges` numbers the outputs from 0; Logisim's own
+  `bit*` attributes number them from 1, which is the trap that caught the reporting agent);
+* every reply that describes such a component carries a **`split`**: each fan-out output, the
+  input bits it carries and its width. A bit value that did not take is named in `warnings`
+  (“'bit0' was asked for 5 but reads 1 … the split fell back to an even one”), because that is the
+  one thing a caller cannot work out from the attributes it sent.
 
 ### Making the answer hard to miss
 
@@ -319,6 +416,39 @@ forward:
 
 The selection the user already had is left alone, and a call that edits the displayed circuit highlights what
 it touched exactly as before.
+
+**The one call that moves the user's view** is an appearance edit. A symbol is drawn in only one place -
+Logisim's own appearance view (`Project | Edit Circuit Appearance`) - so an edit that stayed on the schematic
+would be invisible to the user: the shape they just asked for would not appear anywhere. A call that changes
+an appearance therefore makes that circuit current, switches the window to its appearance view and selects
+what it changed, and the reply says so. `logisim_circuit_select` puts the window back on the schematic (the
+view follows the current circuit), and `logisim_undo` leaves the view where it is, so the user watches the
+shapes come back off.
+
+What a window shows is reported rather than assumed: `logisim_gui_status` and `logisim_gui_windows` carry
+`view` (`circuit (the schematic)` or `appearance (the symbol of this circuit…)`) and `selection_of`, which
+says which of the two canvases the reported selection belongs to - components on the schematic, or shapes and
+ports of the symbol. Without it a status reply would name the Pins selected behind an appearance view, which
+is not what the user is looking at. `logisim_gui_select` adds `visible`: with the appearance on screen the
+highlight goes to the canvas behind it, so it answers `visible: false` and says to call
+`logisim_circuit_select`.
+
+**The simulator is put to sleep for the call.** `Simulator.isRunning` starts out true, and Logisim's own
+`PropagationManager` thread propagates whatever is dirty; a tool call propagating at the same moment puts two
+threads inside one `Propagator`, whose priority queue is then corrupted. That is not theoretical: it produced
+`NullPointerException` at `Propagator$SetData.compareTo`, logged from both the tool call and Logisim's own
+thread, and values that looked like the previous vector - in a live session which had opened a file, so the
+ticker was running and nothing ever stopped it. Every call that propagates or reads now stops it first, and
+again after propagating, and says so when it had to:
+
+> "simulator_stopped": true, "simulator_stopped_note": "Logisim's simulator was running, so it was stopped
+> before anything was propagated or read … Press F5 (or Simulate | Run) in the window to run it again"
+
+`logisim_sim_status` reports `background_simulator_running` (false is the state a call leaves behind) and,
+when a call had to stop one, the same note. A vector that cannot be evaluated at all - a value that does not
+fit its pin, a pin the circuit does not have - keeps its own row with `error` and is counted in `errors`,
+while the vectors beside it are still run and the state is rebuilt so they run cleanly: a verification pass
+never vanishes because one line of it was wrong.
 
 ### Seeing the wiring through the netlist
 
@@ -752,6 +882,7 @@ config, the sample `.circ` files and the workspace notes; those belong to the
 .\build-mcp.ps1 -Jar -Exe             # ... and the Windows application image
 .\build-mcp.ps1 -Jar -Single          # ... and one exe with the jar wrapped inside
 .\build-mcp.ps1 -Jar -Single -Console # ... with a console launcher (see below)
+.\build-mcp.ps1 -Single               # -Jar is implied by -Exe and -Single
 ```
 
 | Artifact | What it is |
@@ -762,9 +893,21 @@ config, the sample `.circ` files and the workspace notes; those belong to the
 | `build/dist/Logisim/Logisim.exe` | a `jpackage` application image instead: the fat jar next to a bundled runtime, roughly 60 MB in the folder, nothing else needed on the machine |
 
 All of them were verified by driving the MCP handshake through them (`initialize` and
-`logisim_status`): each reported `2.15.0.1` and all 46 tools. The single exe was
+`logisim_status`), and the exe again after the appearance tools were added: the exe's own
+`logisim_self_test` reported **15 of 15 checks passed** with `tools_available: 56`, which is
+the strongest form of the check - its `tools` check names every tool this build is supposed
+to have, so a package that had lost one could not pass it. The single exe was
 checked deliberately from a directory that does **not** contain the jar, which is what
 proves the jar really is inside it.
+
+`-Exe` and `-Single` **build the fat jar themselves**: both wrap it, so neither can be built
+without it, and `-Jar` is implied. That is not a convenience. Until it was fixed, `-Single`
+on its own compiled the sources and then wrapped whatever jar an earlier run had left in
+`build/dist`, so an exe could package a build from weeks before - and did: an exe whose
+sources had 56 tools served 54, because the jar inside it was the one built for the previous
+round. A plain compile now also says so if a leftover jar predates the classes it just
+compiled, since running such a jar directly reports the older build's tool set and looks
+exactly like a broken build.
 
 The **manual is packaged with the application** (`doc/`, all five languages, about
 4.5 MB): the GUI's Help menu resolves `doc/doc_en.hs` from the classpath, and

@@ -24,6 +24,9 @@
 #                              as the released Compiled/Logisim-ITA.exe. It needs a
 #                              Java 8 or newer runtime on the machine, unlike -Exe,
 #                              which carries its own. -Console applies here too.
+#                              -Exe and -Single build the fat jar themselves (-Jar is
+#                              implied): they wrap it, so wrapping a jar left behind by
+#                              an earlier run would package older code.
 #   switches combine, e.g. ./build-mcp.ps1 -Clean -Jar -Exe
 #
 # A JDK is required: -JavaHome <jdk>, else JAVA_HOME, else javac.exe on PATH.
@@ -84,8 +87,30 @@ try {
     if ($code -ne 0) { throw "compilation failed: javac exited with $code" }
     Write-Host "ok: $out ($count sources)"
 
+    # -Exe and -Single both wrap the fat jar, so neither can be built without it: asking
+    # for either one builds the jar as well. That implication is what $pack is for -
+    # -Single on its own used to compile the sources and then wrap whatever jar an
+    # earlier run had left in build/dist, i.e. package older code, which is how an exe
+    # came to offer 54 tools while the tree it was built beside had 56.
+    $pack = [bool]$Jar -or [bool]$Exe -or [bool]$Single
+    if ($pack -and -not $Jar) {
+        Write-Host "note: -Jar is implied by -Exe/-Single, which wrap the fat jar"
+    }
+    if (-not $pack) {
+        # A jar an earlier run left behind is older code, and running it - or wrapping it
+        # - reports the tool set of that earlier build. Say so, because a jar that is
+        # quietly one build behind looks exactly like a broken build.
+        $newest = (Get-ChildItem -Recurse -Filter *.class $out |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+        foreach ($old in @("build\dist\app\Logisim-jar-with-dependencies.jar", "build\dist\Logisim.jar")) {
+            if ((Test-Path $old) -and (Get-Item $old).LastWriteTime -lt $newest) {
+                Write-Host "note: $old is older than the classes just compiled - run with -Jar to rebuild it, or it carries older code"
+            }
+        }
+    }
+
     # ------------------------------------------------------------------ packaging
-    if ($Jar -or $Exe) {
+    if ($pack) {
         if (-not (Test-Path $jartool)) { throw "-Jar needs the jar tool of the same JDK as javac" }
         $ErrorActionPreference = "Continue"
 
@@ -138,7 +163,7 @@ try {
         $ErrorActionPreference = "Continue"
         $dist = "build\dist"
         $appDir = Join-Path $dist "app"
-        if (-not (Test-Path $appDir)) { throw "-Exe needs the fat jar: run with -Jar as well" }
+        if (-not (Test-Path $appDir)) { throw "the fat jar is missing: -Exe needs -Jar, which it normally implies" }
         $launcher = @()
         if ($Console) { $launcher = @("--win-console") }
         & $jpackage --type app-image --name Logisim --dest $dist --input $appDir `
@@ -158,7 +183,7 @@ try {
         # the local Maven cache; nothing is downloaded.
         $dist = "build\dist"
         $fat = Join-Path $dist "app\Logisim-jar-with-dependencies.jar"
-        if (-not (Test-Path $fat)) { throw "-Single needs the fat jar: run with -Jar as well" }
+        if (-not (Test-Path $fat)) { throw "the fat jar is missing: -Single needs -Jar, which it normally implies" }
         $ErrorActionPreference = "Continue"
 
         $m2 = Join-Path $env:USERPROFILE ".m2\repository"

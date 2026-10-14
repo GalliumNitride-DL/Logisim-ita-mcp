@@ -56,7 +56,8 @@ public final class SelfTest {
 			"logisim_sim_set_input", "logisim_sim_set_inputs", "logisim_sim_read", "logisim_sim_read_all",
 			"logisim_sim_propagate", "logisim_sim_tick", "logisim_sim_trace", "logisim_sim_status",
 			"logisim_sim_run_vectors", "logisim_analyze_truth_table", "logisim_analyze_expression",
-			"logisim_circuit_build", "logisim_screenshot", "logisim_circuit_repair_wires" };
+			"logisim_circuit_build", "logisim_screenshot", "logisim_circuit_repair_wires",
+			"logisim_circuit_appearance", "logisim_circuit_appearance_edit" };
 
 	private final McpSession session = new McpSession();
 	private final ToolRegistry tools;
@@ -181,6 +182,34 @@ public final class SelfTest {
 			@Override
 			public void run() throws Exception {
 				checkTrace();
+			}
+		});
+		check("sim_determinism", "a simulator that is running is stopped for the call, and one vector that cannot "
+				+ "be evaluated costs a row instead of the batch", new Body() {
+			@Override
+			public void run() throws Exception {
+				checkSimulatorDeterminism();
+			}
+		});
+		check("wiring", "a branch that lands on a wire the same call drew is a T-joint, not an endpoint that "
+				+ "connects nothing", new Body() {
+			@Override
+			public void run() throws Exception {
+				checkWiring();
+			}
+		});
+		check("splitter", "a splitter's per-bit attributes take, and the reply reports the split that came out",
+				new Body() {
+					@Override
+					public void run() throws Exception {
+						checkSplitter();
+					}
+				});
+		check("appearance", "a subcircuit's symbol can be read, arranged, pictured, taken back with one undo "
+				+ "and reset to Logisim's own layout", new Body() {
+			@Override
+			public void run() throws Exception {
+				checkAppearance();
 			}
 		});
 		check("save/load", "the project survives being saved and opened again", new Body() {
@@ -377,6 +406,179 @@ public final class SelfTest {
 						+ "0x00; it reads " + Json.compact(after.getAsJsonObject("values")));
 	}
 
+	/**
+	 * A subcircuit's symbol: reading it, arranging it, looking at it, and taking the whole
+	 * arrangement back with the one undo that the tool promises.
+	 */
+	private void checkAppearance() throws Exception {
+		ensureSymbol();
+		JsonObject before = call("logisim_circuit_appearance",
+				Json.object("circuit", "sym", "include_shapes", Boolean.TRUE));
+		expect(before.get("is_default").getAsBoolean(), "a symbol nobody has touched should still be laid out by "
+				+ "Logisim itself, but 'is_default' reads " + before.get("is_default"));
+		JsonArray ports = array(before, "ports");
+		expect(ports != null && ports.size() == 2, "two Pins make two ports in the symbol, but the answer reports "
+				+ (ports == null ? "none" : String.valueOf(ports.size())));
+		expect("A".equals(text(ports.get(0).getAsJsonObject(), "pin"))
+				&& "B".equals(text(ports.get(1).getAsJsonObject(), "pin")),
+				"the ports should come back in the order their Pins were placed (A, then B), because that order is "
+						+ "what \"<instance>.0\" and \"<instance>.1\" refer to; the answer was "
+						+ Json.compact(ports));
+		expect(ports.get(0).getAsJsonObject().get("index").getAsInt() == 0
+				&& ports.get(1).getAsJsonObject().get("index").getAsInt() == 1,
+				"the two ports should be numbered 0 and 1, but they report "
+						+ ports.get(0).getAsJsonObject().get("index") + " and "
+						+ ports.get(1).getAsJsonObject().get("index"));
+
+		JsonObject edit = call("logisim_circuit_appearance_edit", Json.object("circuit", "sym",
+				"move", Json.array(Json.object("pin", "A",
+						"to", Json.array(Integer.valueOf(-40), Integer.valueOf(50)))),
+				"add", Json.array(
+						Json.object("kind", "rect", "at", Json.array(Integer.valueOf(-40), Integer.valueOf(0)),
+								"size", Json.array(Integer.valueOf(240), Integer.valueOf(100))),
+						Json.object("kind", "text", "at", Json.array(Integer.valueOf(60), Integer.valueOf(40)),
+								"text", "logic"))));
+		expect(edit.get("changed").getAsInt() >= 3, "moving one port and adding two shapes should report at least "
+				+ "three changes; the answer was " + Json.compact(edit));
+		expect(!edit.get("is_default").getAsBoolean(), "arranging a symbol by hand takes it out of Logisim's "
+				+ "automatic layout, so 'is_default' should be false afterwards");
+		expect(edit.get("frozen_note") != null, "arranging a symbol that Logisim was still laying out freezes that "
+				+ "arrangement, and the caller has to be told: the box Logisim drew round the automatic ports stays "
+				+ "behind as an ordinary shape, wherever the ports have since gone. The answer was "
+				+ Json.compact(edit));
+
+		JsonObject after = call("logisim_circuit_appearance", Json.object("circuit", "sym"));
+		JsonObject moved = portNamed(after, "A");
+		expect(moved != null, "the arranged symbol should still carry a port for pin A; it reports "
+				+ Json.compact(array(after, "ports")));
+		expect(moved.getAsJsonArray("loc").get(0).getAsInt() == -40
+				&& moved.getAsJsonArray("loc").get(1).getAsInt() == 50,
+				"pin A's port was moved to (-40, 50), but it reports " + moved.get("loc"));
+		expect(hasShape(after, "rect") && hasShape(after, "text"), "the rectangle and the text the call added "
+				+ "should both be part of the symbol; it reports " + Json.compact(array(after, "shapes")));
+
+		call("logisim_undo", new JsonObject());
+		JsonObject reverted = call("logisim_circuit_appearance",
+				Json.object("circuit", "sym", "include_shapes", Boolean.TRUE));
+		expect(reverted.get("is_default").getAsBoolean(), "one undo should take the whole call back - a moved port "
+				+ "and two shapes at once, as the tool promises - and leave the circuit on Logisim's own layout "
+				+ "again, so 'is_default' should be true; it reads " + reverted.get("is_default"));
+		expect(!hasShape(reverted, "rect"), "the rectangle that call added should be gone after one undo; the "
+				+ "symbol still reports " + Json.compact(array(reverted, "shapes")));
+
+		String png = new File(tempDir, "symbol.png").getAbsolutePath();
+		JsonObject shot = call("logisim_screenshot", Json.object("circuit", "sym", "appearance", Boolean.TRUE,
+				"scale", Integer.valueOf(2), "path", png));
+		JsonObject image = shot.getAsJsonObject("image");
+		expect(image != null && image.get("bytes").getAsInt() > 0 && "image/png".equals(text(image, "mimeType")),
+				"asking for the symbol as a picture should return a PNG, but the answer was " + Json.compact(shot));
+		if (image != null && image.get("bytes").getAsInt() > 0) {
+			File file = new File(png);
+			expect(file.isFile() && file.length() == image.get("bytes").getAsInt(),
+					"the picture should be on disk at the size the answer reported: " + file.length() + " bytes "
+							+ "on disk against " + image.get("bytes") + " reported");
+			expect(isPng(file), "the file the screenshot wrote should start with the PNG signature");
+		}
+
+		JsonObject reset = call("logisim_circuit_appearance_edit",
+				Json.object("circuit", "sym", "reset", Boolean.TRUE));
+		expect(reset.get("is_default").getAsBoolean(), "a reset hands the symbol back to Logisim's own layout, so "
+				+ "'is_default' should be true again; the answer was " + Json.compact(reset));
+
+		// The names are written where the ports will be once this call's own moves have been applied.
+		// Nothing is applied until the whole call is collected into one action, so on a symbol Logisim
+		// was still laying out they used to be written at the automatic ports' place instead - a heap
+		// of letters a few units from the origin, nowhere near the ports they name.
+		JsonObject labelled = call("logisim_circuit_appearance_edit", Json.object("circuit", "sym",
+				"label_ports", Boolean.TRUE,
+				"move", Json.array(
+						Json.object("pin", "A", "to", Json.array(Integer.valueOf(0), Integer.valueOf(50))),
+						Json.object("pin", "B", "to", Json.array(Integer.valueOf(200), Integer.valueOf(50))))));
+		JsonArray labels = array(labelled, "labels");
+		expect(labels != null && labels.size() == 2, "labelling a two port symbol should write one text shape per "
+				+ "port; the answer reports " + (labels == null ? "none" : String.valueOf(labels.size())));
+		JsonObject labelledNow = call("logisim_circuit_appearance", Json.object("circuit", "sym",
+				"include_shapes", Boolean.TRUE));
+		expect(shapeNear(labelledNow, "text", "A", 10, 50), "pin A's port was moved to (0, 50), so its name "
+				+ "belongs just inside the symbol beside it, at (10, 50); the shapes are "
+				+ Json.compact(array(labelledNow, "shapes")));
+		expect(shapeNear(labelledNow, "text", "B", 190, 50), "pin B's port was moved to (200, 50), so its name "
+				+ "belongs just inside the symbol beside it, at (190, 50); the shapes are "
+				+ Json.compact(array(labelledNow, "shapes")));
+
+		JsonObject again = call("logisim_circuit_appearance_edit",
+				Json.object("circuit", "sym", "label_ports", Boolean.TRUE));
+		expect(again.get("changed").getAsInt() == 0 && array(again, "labels") == null,
+				"asking for the port labels a second time should add nothing, because a symbol whose names are "
+						+ "already written would otherwise collect a second copy of each; the answer was "
+						+ Json.compact(again));
+		expect(again.get("labels_note") != null, "the second 'label_ports' call should say why it added nothing; "
+				+ "the answer was " + Json.compact(again));
+	}
+
+	/**
+	 * Whether the described symbol holds a text of this content at about this point. A text shape
+	 * reports its ink, which moves with its alignment and is empty until it is first painted, so the
+	 * point is matched with room for that rather than exactly.
+	 */
+	private static boolean shapeNear(JsonObject described, String kind, String content, int x, int y) {
+		JsonArray shapes = array(described, "shapes");
+		if (shapes == null) {
+			return false;
+		}
+		for (JsonElement element : shapes) {
+			JsonObject shape = element.getAsJsonObject();
+			if (!kind.equals(text(shape, "kind")) || !content.equals(text(shape, "text"))) {
+				continue;
+			}
+			JsonArray bounds = shape.getAsJsonArray("bounds");
+			if (bounds != null && Math.abs(bounds.get(0).getAsInt() - x) <= 12
+					&& Math.abs(bounds.get(1).getAsInt() - y) <= 12) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The described port whose Pin label is this one, or null. */
+	private static JsonObject portNamed(JsonObject described, String pin) {
+		JsonArray ports = array(described, "ports");
+		if (ports == null) {
+			return null;
+		}
+		for (JsonElement element : ports) {
+			JsonObject port = element.getAsJsonObject();
+			if (pin.equals(text(port, "pin"))) {
+				return port;
+			}
+		}
+		return null;
+	}
+
+	/** Whether the described symbol holds a shape of this kind. */
+	private static boolean hasShape(JsonObject described, String kind) {
+		JsonArray shapes = array(described, "shapes");
+		if (shapes == null) {
+			return false;
+		}
+		for (JsonElement element : shapes) {
+			if (kind.equals(text(element.getAsJsonObject(), "kind"))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The PNG signature, read back from the file rather than trusted from the answer. */
+	private static boolean isPng(File file) {
+		try {
+			byte[] head = java.nio.file.Files.readAllBytes(file.toPath());
+			return head.length > 8 && head[0] == (byte) 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G';
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
 	private void checkTrace() throws Exception {
 		ensureCounter();
 		JsonObject trace = call("logisim_sim_trace", Json.object("circuit", "clocked", "signals",
@@ -386,6 +588,107 @@ public final class SelfTest {
 				+ "cycles; the trace reported " + (rows == null ? "no rows" : String.valueOf(rows.size()) + " rows"));
 		expect(trace.get("changes").getAsInt() >= 2, "a flip-flop whose complement feeds its data input should "
 				+ "change at least twice in six cycles, but 'changes' reads " + trace.get("changes").getAsInt());
+	}
+
+	/**
+	 * A simulator that is running is what an agent meets in live mode: Logisim starts its own
+	 * ticker by default and it propagates whatever is dirty, so a tool call propagating at the
+	 * same moment puts two threads inside one propagator and corrupts its queue. A call that
+	 * propagates therefore has to stop it - and a vector that cannot be evaluated has to cost one
+	 * row, not the whole batch, which is what used to happen.
+	 */
+	private void checkSimulatorDeterminism() throws Exception {
+		ensureAdder();
+		session.project().getSimulator().setIsRunning(true);
+		JsonObject answer = call("logisim_sim_run_vectors", Json.object("circuit", "main",
+				"values", Json.object("A", "5", "B", "3"), "expect", Json.object("S", "8")));
+		expect(!session.project().getSimulator().isRunning(), "a call that propagates while Logisim's own ticker "
+				+ "is running corrupts the propagator's queue, so it has to stop it first; the simulator is still "
+				+ "running after the call");
+		expect(answer.get("passed").getAsInt() == 1, "the vector should still pass, but the reply was "
+				+ Json.compact(answer));
+		expect(answer.has("simulator_stopped"), "the reply should say that a running simulator was stopped, or the "
+				+ "user is left wondering why the clock stopped: " + Json.compact(answer));
+
+		JsonObject reply = call("logisim_sim_run_vectors", Json.object("circuit", "main", "vectors", Json.array(
+				Json.object("values", Json.object("A", "5", "B", "3"), "expect", Json.object("S", "8")),
+				Json.object("values", Json.object("A", "1", "B", "1"),
+						"expect", Json.object("COUT", "9")))));
+		JsonArray rows = array(reply, "rows");
+		expect(reply.get("vector_count").getAsInt() == 2 && rows != null && rows.size() == 2, "a vector that cannot "
+				+ "be evaluated must keep its own row, and the vectors beside it must still be run: the batch used to "
+				+ "be lost entirely, so the caller saw nothing but an exception");
+		expect(reply.get("errors") != null && reply.get("errors").getAsInt() == 1, "'COUT' is one bit wide, so "
+				+ "expecting 9 of it is that one vector's error; the reply was " + Json.compact(reply));
+		expect(reply.get("passed") == null || reply.get("passed").getAsInt() == 1, "the good vector in the same "
+				+ "call should still have passed, but the reply was " + Json.compact(reply));
+	}
+
+	/**
+	 * A branch drawn into a trunk by the same call. That is a T-joint, and the checker used to
+	 * judge the endpoint against the wires that existed before the call, so whether it warned
+	 * depended on which path came first - and a correct batch came back with "it connects
+	 * nothing" against wiring that was already joined.
+	 */
+	private void checkWiring() throws Exception {
+		call("logisim_circuit_create", Json.object("name", "wiring"));
+		call("logisim_component_add_many", Json.object("circuit", "wiring", "components", Json.array(
+				component("Wiring", "Pin", 100, 200, "A", "{\"facing\":\"east\",\"width\":1}"),
+				component("Wiring", "Pin", 500, 200, "Y", "{\"facing\":\"west\",\"width\":1,\"output\":true}"),
+				component("Wiring", "Pin", 180, 400, "P", "{\"facing\":\"north\",\"width\":1}"))));
+		JsonObject answer = call("logisim_wire_add", Json.object("circuit", "wiring", "paths", Json.array(
+				Json.array("A", "Y"),
+				Json.array("P", "180,200"))));
+		JsonArray warnings = array(answer, "warnings");
+		expect(warnings == null || warnings.size() == 0, "a branch that lands on a wire drawn by the same call is "
+				+ "connected, so warning about it makes a correct batch look wrong; the reply said "
+				+ Json.compact(warnings));
+		expect(answer.has("joins"), "the T-joint should be reported as a join, naming the wire this same call drew: "
+				+ Json.compact(answer));
+		JsonObject nets = call("logisim_circuit_nets", Json.object("circuit", "wiring", "compact", Boolean.TRUE));
+		expect(nets.get("net_count").getAsInt() == 1, "A, P and Y should now be one net, but the netlist says "
+				+ nets.get("net_count") + ": " + Json.compact(nets));
+		call("logisim_circuit_select", Json.object("circuit", "main"));
+	}
+
+	/**
+	 * A splitter's per-bit attributes are recreated whenever its shape changes, so values put on
+	 * the attribute set before the component exists are lost to the default even split; and the
+	 * reply now reports the split that came out, which is the only way a caller can see that
+	 * 5/27 became 16/16.
+	 */
+	private void checkSplitter() throws Exception {
+		call("logisim_circuit_create", Json.object("name", "split"));
+		JsonObject placed = call("logisim_component_add", Json.object("circuit", "split", "lib", "Wiring",
+				"type", "Splitter", "x", Integer.valueOf(300), "y", Integer.valueOf(200),
+				"attributes", Json.object("incoming", Integer.valueOf(32), "fanout", Integer.valueOf(2),
+						"bit_ranges", Json.object("0-4", Integer.valueOf(0), "5-31", Integer.valueOf(1)))));
+		JsonObject split = placed.getAsJsonObject("split");
+		expect(split != null, "the reply should report the split it produced, not only the bit attributes: "
+				+ Json.compact(placed));
+		expect(split.get("fanout").getAsInt() == 2, "'0-4' as output 0 and '5-31' as output 1 is a two-way split, "
+				+ "but the reply says fanout " + split.get("fanout") + ": " + Json.compact(split));
+		JsonArray outputs = array(split, "outputs");
+		expect(outputs != null && outputs.size() == 2, "two outputs were asked for: " + Json.compact(split));
+		expect("0-4".equals(text(outputs.get(0).getAsJsonObject(), "bits"))
+				&& "5-31".equals(text(outputs.get(1).getAsJsonObject(), "bits")),
+				"the split should be 5/27 - bits 0-4 on the first output, 5-31 on the second - but the bit "
+						+ "attributes came out as " + Json.compact(split));
+
+		JsonObject second = call("logisim_component_add", Json.object("circuit", "split", "lib", "Wiring",
+				"type", "Splitter", "x", Integer.valueOf(600), "y", Integer.valueOf(200),
+				"attributes", Json.object("bit0", Integer.valueOf(1), "bit1", Integer.valueOf(1),
+						"bit2", Integer.valueOf(1), "bit3", Integer.valueOf(2),
+						"incoming", Integer.valueOf(4), "fanout", Integer.valueOf(2))));
+		JsonObject split2 = second.getAsJsonObject("split");
+		JsonArray outputs2 = split2 == null ? null : array(split2, "outputs");
+		expect(outputs2 != null && outputs2.size() == 2, "a four bit two-way splitter reports two outputs: "
+				+ Json.compact(second));
+		expect("0-2".equals(text(outputs2.get(0).getAsJsonObject(), "bits"))
+				&& "3".equals(text(outputs2.get(1).getAsJsonObject(), "bits")),
+				"bit3 on the second output is a 3+1 split, and the bit values were written before the shape: "
+						+ Json.compact(split2));
+		call("logisim_circuit_select", Json.object("circuit", "main"));
 	}
 
 	private void checkSaveLoad() throws Exception {
@@ -544,6 +847,15 @@ public final class SelfTest {
 				Json.array(text(portAt(clock, 0), "ref"), text(trigger, "ref")),
 				Json.array(text(complement, "ref"), text(data, "ref")),
 				Json.array(text(state, "ref"), "Q"))));
+		call("logisim_circuit_select", Json.object("circuit", "main"));
+	}
+
+	/** A subcircuit with two Pins in it, whose symbol the appearance check arranges. */
+	private void ensureSymbol() throws Exception {
+		call("logisim_circuit_create", Json.object("name", "sym"));
+		call("logisim_component_add_many", Json.object("circuit", "sym", "components", Json.array(
+				component("Wiring", "Pin", 100, 100, "A", "{\"facing\":\"east\",\"width\":1}"),
+				component("Wiring", "Pin", 100, 200, "B", "{\"facing\":\"east\",\"width\":1}"))));
 		call("logisim_circuit_select", Json.object("circuit", "main"));
 	}
 

@@ -29,7 +29,7 @@ public class ToolRegistry {
 	private static final java.util.Set<String> MUTATING = new java.util.HashSet<String>(java.util.Arrays.asList(
 			"logisim_component_add", "logisim_component_remove", "logisim_component_move",
 			"logisim_component_set_attributes", "logisim_wire_add", "logisim_wire_remove",
-			"logisim_component_memory",
+			"logisim_component_memory", "logisim_circuit_appearance_edit",
 			"logisim_circuit_build", "logisim_circuit_repair_wires", "logisim_file_save", "logisim_file_save_as"));
 
 	/**

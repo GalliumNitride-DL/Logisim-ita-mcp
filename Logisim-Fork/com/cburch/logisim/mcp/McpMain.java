@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import com.cburch.logisim.mcp.tools.AnalyzeTools;
+import com.cburch.logisim.mcp.tools.AppearanceTools;
 import com.cburch.logisim.mcp.tools.CatalogTools;
 import com.cburch.logisim.mcp.tools.CircuitTools;
 import com.cburch.logisim.mcp.tools.DiagTools;
@@ -476,6 +477,8 @@ public final class McpMain {
 		registry.register(CircuitTools.setMain(session));
 		registry.register(CircuitTools.select(session));
 		registry.register(CircuitTools.statistics(session));
+		registry.register(AppearanceTools.describe(session));
+		registry.register(AppearanceTools.edit(session));
 		registry.register(NetTools.nets(session));
 		registry.register(LintTools.lint(session));
 

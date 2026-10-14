@@ -103,7 +103,19 @@ public final class McpInstructions {
 			+ "- Place every component before wiring, so no wire has to pass something that does not exist yet. Two "
 			+ "wires crossing is harmless. A wire that ENDS on another wire joins it, and a wire that passes through "
 			+ "a port joins that net: logisim_wire_add warns about that case and names the wire, and "
-			+ "logisim_wire_remove {loc: [x, y]} removes just that segment.";
+			+ "logisim_wire_remove {loc: [x, y]} removes just that segment."
+			+ "\n"
+			+ "SUBCIRCUIT SYMBOLS - a circuit is also a component, and what a parent draws for it is its appearance:\n"
+			+ "- The appearance is the symbol: one port per Pin of the circuit, plus any shapes and text. The position of a "
+			+ "port there is the position of that pin on every instance of the circuit, and the order of the ports is the "
+			+ "order of an instance's ports (so it decides what \"c3.1\" means). logisim_circuit_appearance reads it, "
+			+ "logisim_circuit_appearance_edit arranges it in one undoable step, and logisim_screenshot "
+			+ "{appearance: true} shows it.\n"
+			+ "- Logisim lays a symbol out by itself until something arranges it by hand, so placing the circuit's Pins "
+			+ "sensibly is usually enough: adding, moving, renaming or re-facing a Pin rearranges the symbol for free. The "
+			+ "first appearance edit freezes that arrangement, and 'reset' gives the automatic layout back.\n"
+			+ "- Editing an appearance in live mode switches the user's window to that symbol deliberately: the canvas does "
+			+ "not draw a symbol at all, so leaving the view there would hide the work.";
 
 	/** Added to the instructions when the server runs inside the user's Logisim window. */
 	public static final String LIVE_SUFFIX = "\n"
@@ -279,7 +291,10 @@ public final class McpInstructions {
 			+ "are named. A single test may be given as 'values' with 'expect' beside it. Values take the same forms "
 			+ "as logisim_sim_set_input, including hex such as 0xFF; pass 'include_signals: false' to keep the answer "
 					+ "small when only the expected pins matter, and 'radix' (bin, hex, dec, signed) to have the observed "
-					+ "values written in the form you want to read them in.";
+					+ "values written in the form you want to read them in. A vector that cannot be evaluated at all - a "
+					+ "value that does not fit its pin, a pin the circuit does not have - keeps its own row with "
+					+ "'error' and is counted in 'errors'; the other vectors are still run, so one bad vector never loses "
+					+ "the batch.";
 	public static final String COMPONENT_ADD = "Places one component (gate, pin, flip-flop, multiplexer, memory, subcircuit, ...) at a position in "
 					+ "a circuit. Returns the new component's session id, its ports and their positions. "
 					+ "Components are not connected by placement: add wires with logisim_wire_add so that a wire "
@@ -327,7 +342,9 @@ public final class McpInstructions {
 					+ "uncoloured view, 'transparent' for a see-through background, and 'path' to write the file as well "
 					+ "so the user can open it. The picture shows what is drawn, not what is connected: a wire that crosses "
 					+ "another looks the same as one that joins it, so check the electrical side with "
-					+ "logisim_circuit_nets. Very large requests are refused rather than exhausting the heap.";
+					+ "logisim_circuit_nets. Very large requests are refused rather than exhausting the heap. With "
+					+ "'appearance': true it draws the circuit's appearance instead - the symbol a parent shows for "
+					+ "it, with every port labelled, which is the only way to see a subcircuit's appearance.";
 
 	public static final String COMPONENT_REMOVE = "Removes a component or a single wire from a circuit. Attached wires are left in place, so they may "
 					+ "end up dangling; remove them separately with logisim_wire_remove if that is not wanted.";
@@ -342,7 +359,10 @@ public final class McpInstructions {
 	public static final String COMPONENT_SET_ATTRIBUTES = "Changes one or more attributes of an existing component, for example renaming a pin (label), "
 					+ "switching a pin between input and output (output = true/false), widening a bus (width), or "
 					+ "changing a memory's address size. Attribute names and legal values are listed by "
-					+ "logisim_component_catalog.";
+					+ "logisim_component_catalog. Attributes that decide a component's shape ('incoming' and 'fanout' of "
+					+ "a Splitter) are applied first whatever order they are written in, because they recreate the "
+					+ "per-bit attributes 'bit0', 'bit1', ... ; with a Splitter, check the 'split' in the reply rather "
+					+ "than the 'updated' list, since it shows the split that actually came out.";
 
 	public static final String WIRE_ADD = "Draws wires, which are what actually connect component ports. Give a list of points in 'points'; "
 					+ "consecutive points must share either the x or the y coordinate, and a diagonal step between "
@@ -352,6 +372,8 @@ public final class McpInstructions {
 					+ "coincide exactly with a port position (see the "
 					+ "'ports' entries of logisim_component_add / logisim_circuit_describe) for the connection to "
 					+ "count; use symbolic endpoints such as \"A\" or \"FA0.Cout\" to avoid coordinate arithmetic. "
+					+ "A branch that lands on a wire this same call drew is a join like any other, and is reported as "
+					+ "one ('which this same call drew'), so the order of the paths never matters. "
 					+ "Logisim splits wires automatically where a third wire meets them. IMPORTANT: never try to "
 					+ "produce a wire whose ends differ in both x and y - Logisim cannot iterate such a wire and the "
 					+ "whole session then hangs until the Java heap is exhausted. Let this tool route, keep coordinates "
@@ -411,13 +433,16 @@ public final class McpInstructions {
 
 	public static final String GUI_STATUS = "What the user can see right now, and what state this session is in: whether the server runs inside "
 					+ "a Logisim window (live mode) or headless, the transport and its address, every open window "
-					+ "with its file, unsaved-changes flag, current circuit and selection, whether the user has "
+					+ "with its file, unsaved-changes flag, current circuit, which view it is showing ('view': the "
+					+ "circuit's schematic, or its appearance, i.e. its symbol) and the selection ('selection_of' says "
+					+ "which of the two canvases that selection belongs to), whether the user has "
 					+ "paused the agent or turned on read-only mode, and the tail of the activity log (the same "
 					+ "lines the user sees). Call this first in a session, and after anything that suggests the "
 					+ "user changed something themselves.";
 
 	public static final String GUI_WINDOWS = "Lists the Logisim windows that are open, with the file each one came from, whether it has unsaved "
-					+ "changes, which circuit is on screen, and the current selection. Pass one of the returned "
+					+ "changes, which circuit is on screen, which view it is showing (the schematic, or an appearance, "
+					+ "i.e. a symbol) and the current selection. Pass one of the returned "
 					+ "titles or paths to logisim_gui_focus to bring that window to the front.";
 
 	public static final String GUI_FOCUS = "Brings a window to the front, and switches it to a circuit, so the user is looking at what the "
@@ -430,7 +455,9 @@ public final class McpInstructions {
 					+ "sees what a call is about to touch or has just touched. Every mutating tool does this for "
 					+ "the parts it changed; call this to point at something without changing it, for example to "
 					+ "show the user the two nets that shorted. Any component reference works: an id (\"c3\"), a "
-					+ "label (\"A\"), a port (\"c3.1\") or a location ([150,200]).";
+					+ "label (\"A\"), a port (\"c3.1\") or a location ([150,200]). Components live on the circuit's "
+					+ "canvas, so if the answer says 'visible': false the window is showing an appearance (a symbol) "
+					+ "and the highlight cannot be seen: logisim_circuit_select puts it back on the schematic.";
 
 	public static final String GUI_DESELECT = "Clears the selection, so the user sees nothing highlighted any more. Useful before handing control "
 					+ "back, or after an inspection that was only meant to point at something.";
@@ -503,7 +530,11 @@ public final class McpInstructions {
 					+ "registers, control units) make progress. Returns the pin values after the last cycle.";
 
 	public static final String SIM_STATUS = "Reports how the simulation of a circuit currently stands: how many clock cycles have elapsed, "
-					+ "whether the circuit is oscillating (never settling), and the current pin values.";
+					+ "whether the circuit is oscillating (never settling), and the current pin values. "
+					+ "'background_simulator_running' is Logisim's own ticker, which starts running by default: a call that "
+					+ "propagates or reads stops it first, so false is the state a tool call leaves behind (true means "
+					+ "something started it after the last call). A reply that had to stop it says so with "
+					+ "'simulator_stopped'.";
 
 	public static final String SIM_TRACE = "Records signals over several clock cycles and returns a table: one row per cycle, one column per "
 			+ "watched signal. This is how a sequential circuit is actually verified - a flip-flop, a counter, a "
@@ -544,5 +575,37 @@ public final class McpInstructions {
 			+ "dry_run, simulate, nets, analysis, lint, memory, trace, save/load, recover, docs. A check whose turn "
 			+ "has not come yet builds what it needs first, so a subset works: 'checks': [\"simulate\"] builds the "
 			+ "adder and runs its vectors.";
+
+	public static final String CIRCUIT_APPEARANCE = "Describes a circuit's appearance: the symbol it is drawn as when it is placed inside another "
+			+ "circuit. This is Logisim's 'Edit Circuit Appearance' view as data - the anchor that marks the symbol's "
+			+ "origin, one port per Pin with the position it will have on every instance, the shapes and text drawn "
+			+ "around them, and the rectangle an instance occupies in the parent. 'is_default' says whether Logisim is "
+			+ "still laying the symbol out by itself, which it does until something arranges it by hand. Every object "
+			+ "comes back with an id ('a1', 'a2', ...) that logisim_circuit_appearance_edit accepts; a port can also be "
+			+ "named by its Pin's label. Read this before deciding where a subcircuit's pins should sit, and read the "
+			+ "port list before wiring to an instance: the index reported here is the port number an instance gets.";
+
+	public static final String CIRCUIT_APPEARANCE_EDIT = "Changes a circuit's appearance - the symbol it is drawn as inside another circuit - as one undoable step, "
+			+ "so logisim_undo takes the whole call back. 'move' places ports and shapes ({pin: \"A\", to: [x, y]} puts "
+			+ "that Pin's port there, {id: \"a3\", to: [x, y]} or {id: \"a3\", dx: 10, dy: -10} shifts a shape), 'add' "
+			+ "draws shapes and text (\"rect\", \"oval\", \"line\", or \"text\" with its \"text\"; a line is drawn as the "
+			+ "two point polyline Logisim's own line tool makes, so it comes back as kind \"polyline\"), with optional "
+			+ "stroke, fill, "
+			+ "stroke_width, font_size, paint_type and align), 'remove' deletes a shape, 'set_text' rewrites a text, and "
+			+ "'reset': true throws the arrangement away and lets Logisim lay the symbol out from the circuit's Pins "
+			+ "again. A port can be neither added nor removed here: it stands for a Pin, so add or remove the Pin in "
+			+ "the circuit (logisim_component_add, logisim_component_remove) and the symbol follows. Coordinates are "
+			+ "rounded to the 10 pixel grid, as the appearance view does when it drags, because a port's position here "
+			+ "becomes the position of that pin on every instance - an off-grid port would put every parent's wiring "
+			+ "off the grid. Use logisim_circuit_appearance first to learn the ids, and logisim_screenshot "
+			+ "{appearance: true} afterwards to see the result: a picture is the only way to tell whether the symbol "
+			+ "reads well. Pass 'label_ports': true to write each port's Pin name into the symbol as text - Logisim "
+			+ "draws no pin name on an instance, so a symbol only reads like a block diagram if its own text says so - "
+			+ "and 'dry_run': true to see what a call would change without changing it. A reply that moved a port "
+			+ "reports the two consequences a caller cannot see: 'parent_wiring' names the wires in the circuits that "
+			+ "use this one which now end where the port used to be (Logisim does not move wiring with a port, so they "
+			+ "are dangling), and 'port_order_before'/'port_order_after' appear when the *numbers* of the ports changed, "
+			+ "because an instance's port number follows the port's position in the symbol and so is what \"U1.3\" "
+			+ "resolves to.";
 
 }

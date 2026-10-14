@@ -124,11 +124,12 @@ public final class Schemas {
 	public static JsonObject componentRef(String description) {
 		JsonObject ret = new JsonObject();
 		ret.addProperty("description", description + " Use the component id returned by "
-				+ "logisim_circuit_describe / logisim_component_add, a component label, or "
-				+ "{\"loc\": [x, y]}.");
+				+ "logisim_circuit_describe / logisim_component_add, a component label, a "
+				+ "location [x, y], or {\"loc\": [x, y]}.");
 		JsonArray types = new JsonArray();
 		types.add("string");
 		types.add("object");
+		types.add("array");
 		ret.add("type", types);
 		return ret;
 	}

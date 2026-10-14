@@ -17,9 +17,9 @@ by a workspace clean, which is why it now lives in the repository).*
 | Base | commit `da78b00` (tag `v2.15.0.1`) — Eclipse layout, no Maven, no JSON dependency |
 | Branches | `agents/mcp-support-2.15.0.1` (here, Logisim **2.15.0.1**), `agents/mcp-support-2.16.2.2` (`e47c347`, same layer on **2.16.2.2**), `master` = upstream `ad7c02a`. Nothing is pushed anywhere. |
 | Entry point | `com.cburch.logisim.Main -mcp` (headless) or `-mcp --with-gui` (inside the window); options `--transport stdio\|tcp\|http`, `--port`, `--host`, `--file f.circ`, `--help` |
-| Code | `Logisim-Fork/com/cburch/logisim/mcp` (21 files) + `.../mcp/tools` (14 files) |
+| Code | `Logisim-Fork/com/cburch/logisim/mcp` (23 files) + `.../mcp/tools` (17 files) |
 | Existing code touched | `Main.main` (the `-mcp` dispatch and the GUI hook), `gui/menu/MenuHelp.java` (one item, `Help | MCP Server…`), `gui/log/ComponentSelector.java` (one line, upstream's own later fix); plus the new `gui/main/SelectionBridge.java` and `gui/mcp/McpFrame.java` |
-| Tools | **54** (see §3.1) |
+| Tools | **56** (see §3.1) |
 | Build | `Logisim-Fork/build-mcp.ps1` → `Logisim-Fork/build/classes`; see §7 |
 | Packaging | `build-mcp.ps1 -Jar -Exe -Single [-Console]` → jars and two kinds of Windows exe (§3.3) |
 | Editor setup | root `.classpath` + `.vscode/settings.json` describe the layout; JDT output is `Logisim-Fork/build/jdt` |
@@ -54,7 +54,7 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 
 ## 3. Implemented
 
-### 3.1 Tools (51)
+### 3.1 Tools (56)
 
 | Group | Tools |
 |---|---|
@@ -65,13 +65,14 @@ The MCP layer cannot fix Logisim's internals, so it refuses to let the damage sp
 | Circuits | `logisim_circuit_list`, `logisim_circuit_describe` (components, ports, wires, `skewed_wire_count`, `broken` flags), `logisim_circuit_create`, `logisim_circuit_delete`, `logisim_circuit_set_main`, `logisim_circuit_select`, `logisim_circuit_stats`, `logisim_circuit_nets` (nets: wires, ports, labels, drivers, unconnected ports, tunnel notes, `problems_only`, `compact`) |
 | Checks | `logisim_circuit_lint` (shorts, net faults, tunnel labels, facing, coordinates, overlaps - each finding with a severity and the tool that fixes it) |
 | GUI (live mode) | `logisim_gui_status`, `logisim_gui_windows`, `logisim_gui_focus`, `logisim_gui_select`, `logisim_gui_deselect`, `logisim_gui_read_only`, `logisim_gui_pause` |
-| Picture | `logisim_screenshot` (PNG of a circuit or a region, drawn offscreen so it works headless and with a window open; `scale`, `max_pixels`, `print_view`, `transparent`, `path`) |
+| Picture | `logisim_screenshot` (PNG of a circuit or a region, drawn offscreen so it works headless and with a window open; `scale`, `max_pixels`, `print_view`, `transparent`, `path`, and `appearance: true` to draw a circuit's **symbol** instead of its contents) |
+| Symbols | `logisim_circuit_appearance` (the symbol read back: anchor, `is_default`, bounds, the rectangle an instance occupies, every port in instance order, every shape with its id), `logisim_circuit_appearance_edit` (move ports and shapes, add and remove shapes, set a text, `reset`, `dry_run` - one call is one undo step) |
 | Editing | `logisim_component_add` (`on_unknown_attribute`, `dry_run`), `logisim_component_add_many` (a list of the same objects, one undo step, all or nothing), `logisim_component_duplicate` (`dx`/`dy`/`count`, `attributes` for the copies only), `logisim_component_remove`, `logisim_component_move`, `logisim_component_set_attributes`, `logisim_wire_add` (`points` / `paths` / `from`+`to`, auto-routing, `dry_run`, `joins`), `logisim_wire_remove` (`wire` / `from`+`to` / `loc`) |
 | Simulation | `logisim_sim_reset`, `logisim_sim_set_input`, `logisim_sim_set_inputs`, `logisim_sim_read`, `logisim_sim_read_all`, `logisim_sim_propagate`, `logisim_sim_tick`, `logisim_sim_trace` (the sequence table of signals over n cycles), `logisim_sim_status`, `logisim_sim_run_vectors` (all with `radix`, and `parsed` echoing how each value was read) |
 | Memory | `logisim_component_memory` (read, write and clear the contents of a ROM or a RAM) |
 | Analysis | `logisim_analyze_truth_table`, `logisim_analyze_expression`, `logisim_circuit_build` |
 | Repair | `logisim_circuit_repair_wires` |
-| Self test | `logisim_self_test` (fourteen checks in a session of its own, ~1 s, a report of what failed) |
+| Self test | `logisim_self_test` (fifteen checks in a session of its own, ~1 s, a report of what failed) |
 
 ### 3.2 Behaviour
 
@@ -239,7 +240,68 @@ the process is stopped.
   refusal all exercised. The three P0/P1 regression suites were re-run against the 51-tool build: the same
   14 lint findings on the trial circuit, `nets problems_only` and both dry runs unchanged, and the 79-
   component catalogue audit still reporting a port list or a reason for every one.
-- **`logisim_self_test` is implemented and green on 2.15.0.1**: fourteen checks in about 1.2 s
+- **The same-batch wire warning and the splitter's rebuildable attributes are fixed** (2026-10-10, both
+  reproduced on the reporting agent's circuit first). `wire_add` judged an endpoint against the wires that
+  existed *before* the call, so a branch landing on a trunk the same call drew was reported as "it connects
+  nothing" and the netlist showed it connected - the checks now run against what the call leaves behind, and
+  such a joint is reported as a join ("which this same call drew"). A Splitter's per-bit attributes are
+  recreated whenever `incoming` or `fanout` changes, so values set before the shape (or before the component
+  existed) were replaced by Logisim's default even split: `bit_ranges: {"0-4": 0, "5-31": 1}` produced an
+  even 11/11/10 instead of 5/27, and `{bit0: 5}` on a two-way splitter silently read 1. The shape is applied
+  first, the bits are applied to the component before it enters the circuit, and every reply carries a
+  **`split`** (each output, its input bits, its width) plus a warning when an asked-for bit did not take.
+  Found while fixing it: a component reference written the way the tool descriptions promised - `[x, y]` -
+  was refused ("must be an id, a label, or an object"); a bare `[x, y]` is now accepted. `logisim_self_test` is
+  eighteen checks (`wiring`, `splitter`).
+- **A live session is now deterministic, and a bad vector no longer loses its batch.** A second agent report
+  (2026-10-10) described a `NullPointerException` that lost whole `sim_run_vectors` batches, reads that looked
+  like the previous vector, and a `sim_set_inputs` reply carrying stale signal values - all in live mode, none
+  of which reproduced headless. Replaying it on the reporting agent's own `riscv_alu.circ` found the cause:
+  `Simulator.isRunning` starts out **true** and its `PropagationManager` thread propagates whatever is dirty,
+  so in live mode (where nothing ever stopped the ticker) a call propagating at the same moment put two
+  threads inside one `Propagator` and corrupted its priority queue. The server log showed
+  `NullPointerException` at `Propagator$SetData.compareTo` from the tool call *and* from Logisim's own thread.
+  `McpSession.quietSimulator` stops it before and after every propagate and read and the reply says so
+  (`simulator_stopped`, `background_simulator_running`); a vector that cannot be evaluated is a row with
+  `error` counted in `errors`, with the state rebuilt so the vectors after it still run; and an unexpected
+  failure now carries its first project frame in the tool error, because a packaged exe started without
+  `-Console` has no log for a client to read. Verified on the reported circuit in live mode with edits in
+  between: no `NullPointerException` in the log (two traces before the fix), their 0xFFFFFFFF expect passing,
+  the 4-vector ladder 4/4, and the deliberate bad vector producing `errors: 1` with the good row still
+  passing. `logisim_self_test` is sixteen checks.
+- **The symbol of a subcircuit can be read and arranged** (`logisim_circuit_appearance`,
+  `logisim_circuit_appearance_edit`, `logisim_screenshot {appearance: true}`), which was the last part of a
+  design the layer could not reach. Verified live: a fresh two-Pin circuit reports `is_default: true` with
+  its two ports in instance order; one call moved port A, added a rectangle and a text and reported
+  `changed: 5`, `is_default: false`; **one** `logisim_undo` put the whole call back and returned the circuit
+  to `is_default: true` with the added shapes gone; `reset: true` handed the symbol back to Logisim's own
+  layout; removing a port's Pin names the Pin in the refusal; and a screenshot with `appearance: true` was
+  written and looked at (the rectangle, the text, both ports under their Pin labels and the grey rectangle
+  an instance occupies, which is exactly the area the symbol occupied once placed). Placing the circuit in
+  another one then produced ports at `(550,190)` and `(750,190)` - the appearance's port positions - so the
+  arranged symbol takes effect in the parent. Two things came out of that testing: a new line the tool draws
+  is a two point open `Poly` (what the GUI's own line tool draws), because Logisim's older `Line` shape
+  cannot paint itself without a drag gesture and threw in any picture; and `logisim_self_test` gained an
+  `appearance` check that pins the port order, the one-undo promise and the PNG.
+- **Arranging a symbol now reports what it broke, and writes the port names where they belong** (the
+  appearance follow-up round, 2026-10-10). Moving a port moves that Pin on every instance, so a call now
+  answers with `parent_wiring` (each parent instance, the point its wires still end at, the point the port
+  went to) and, when the new arrangement renumbers the ports, with `port_order_before`/`port_order_after`
+  and a note saying which `"U1.3"`-style references changed meaning. `label_ports: true` writes each port's
+  Pin label into the symbol as a text shape, just inside the side the port sits on. Two defects were found
+  while verifying that, and both are fixed: the labels were built from the port positions as they were
+  *while the call was being collected* rather than as they would be afterwards, so on a symbol Logisim was
+  still laying out they landed in a heap a few units from the origin (an `AppearancePort` keeps its own
+  location, which for an automatic symbol is Logisim's canonical port position, not the Pin's); and the
+  idempotence check compared geometry, which cannot work before a text shape has ever been painted, so
+  asking twice added a second copy of every name. The check is by name now, the drawn preview skips a name
+  the symbol already carries, and the first edit of an automatic symbol says it froze the arrangement
+  (`frozen_note`) because the box Logisim drew round the automatic ports stays behind as an ordinary shape.
+  Verified on a four-port symbol in the parent: labels at `(10,50)`, `(10,150)`, `(390,50)` and `(200,60)`
+  against ports at `(0,50)`, `(0,150)`, `(400,50)` and `(200,50)`, a second call reporting `changed: 0` with
+  `labels_note`, and `hide_port_labels` producing a different picture from the same symbol after a `reset`.
+  `logisim_self_test` is eighteen checks, with the label placement and the second call inside `appearance`.
+- **`logisim_self_test` is implemented and green on 2.15.0.1**: fifteen checks in about 1.2 s
   (`ok: true, check_count: 14, passed: 14`), run against a second session so nothing of the open project
   is touched. Running it found a defect in its own trace fixture within the first minute - a D
   flip-flop's data input has no name in Logisim, so the fixture had wired the complement to the output -
@@ -384,6 +446,11 @@ nothing on screen, so it works headless and with a window open, and it never sav
 | `analysis` | `analyze_truth_table` and `analyze_expression` agree with the circuit that was built |
 | `nets` | the carry net reports one driver, i.e. the `PortFixups` correction still holds |
 | `lint` | a deliberately wrong circuit produces the expected kinds (`tunnel_label_default`, `off_grid`, `unconnected_port`) |
+| `trace` | a flip-flop whose complement feeds its data input changes over several cycles, which is what makes the sequence table a table |
+| `sim_determinism` | a simulator left running is stopped for the call (and the reply says so), and a vector that cannot be evaluated keeps its own row with `error` while the vectors beside it are still run |
+| `wiring` | a branch that lands on a wire drawn by the *same* call is a join (reported as one) rather than an endpoint that connects nothing, and the three points are one net |
+| `splitter` | a `bit_ranges` split of 5/27 really comes out 5/27, bit values written before the shape are not lost, and the reply reports the split that came out |
+| `appearance` | a two-Pin circuit's symbol reports its ports in instance order, one edit moves a port and adds two shapes, **one** undo puts all three back onto Logisim's own layout, the symbol screenshot is a non-empty PNG on disk under its reported size, and `reset` leaves `is_default: true` |
 | `save/load` | the file is read back with the same component, wire and port counts and the same truth table |
 | `recover` | a damaged `.circ` written to the temp directory is refused by `file_open` with the line named, then opened by `file_recover` with `skewed_wire_count: 0` - **the gap that is still open** |
 | `docs` | `logisim_help` returns a manual page, which is exactly what a jar that lost `doc/` cannot do |
@@ -419,8 +486,10 @@ run means something.
    start) live in that window and in the platform preference store rather than in `AppPreferences`, so
    Logisim's own settings machinery and resource bundles were left alone.)
 10. **Observability**: `logisim_screenshot` (**done** - a PNG of a circuit or a region, returned in the reply's
-    image block and optionally written to `path`) and `logisim_sim_trace` (values of named pins over n ticks,
-    i.e. sequence tables for clocked circuits).
+    image block and optionally written to `path`, and with `appearance: true` a PNG of the circuit's *symbol*
+    instead of its contents), `logisim_sim_trace` (values of named pins over n ticks, i.e. sequence tables for
+    clocked circuits) and `logisim_circuit_appearance` (**done** - the symbol read back and arranged, with the
+    live window switched to the appearance view so the user watches it happen).
 
 ### P3 — polish
 
@@ -442,12 +511,20 @@ run means something.
 
 ## 6. Immediate next steps
 
-1. **Commit the work.** Two verified rounds are uncommitted: the P0/P1 feedback round and this one
-   (`logisim_self_test`, `logisim_component_memory`, `logisim_sim_trace`, the router search with the
+1. **Commit the work.** Six verified rounds are uncommitted: the P0/P1 feedback round, the capability
+   round (`logisim_self_test`, `logisim_component_memory`, `logisim_sim_trace`, the router search with the
    corner-on-port fix, the size and heap advice, and the three defects found while testing - the
    `Main.getVersion()` crash that stopped the server starting at all, the unresolvable component id after
-   `logisim_file_open`, and the corner that landed on a port). It is a large but self-contained and
-   verified change set; nothing should start on top of it.
+   `logisim_file_open`, and the corner that landed on a port), the appearance round
+   (`logisim_circuit_appearance`, `logisim_circuit_appearance_edit`, `logisim_screenshot {appearance: true}`,
+   the live view switch to the appearance view, and the `appearance` self-test check), the determinism
+   round (the live-mode simulator race, per-vector `error` rows, the first stack frame in tool errors, and
+   the `sim_determinism` check), the wiring/splitter round (the same-batch join warning, the splitter's
+   rebuildable bit attributes with the `split` echo, the `[x, y]` component reference, and the `wiring` and
+   `splitter` checks), and the appearance follow-up round (the `parent_wiring` and port-order reports,
+   `label_ports` written inside the symbol and idempotent, the `frozen_note`, and the label half of the
+   `appearance` check). It is a large but
+   self-contained and verified change set; nothing should start on top of it.
 2. **Decide on the three library findings** ([`MCP-AGENT-FEEDBACK.md`](MCP-AGENT-FEEDBACK.md) §8.5). Two
    are worth a decision: a `RAM`'s data bus loses its name to a misplaced assignment (one-line swap, no
    effect on simulation), and a `7402` is pinned like a `7400`, which the fork's own later `master` has
@@ -474,8 +551,16 @@ cd Logisim-Fork
 .\build-mcp.ps1                 # compile into build/classes
 .\build-mcp.ps1 -Clean -Run     # ... after deleting build/, then serve MCP over stdio
 .\build-mcp.ps1 -Jar -Exe -Single -Console   # packaging (see §3.3)
-.\build-mcp.ps1 -Single         # one exe, jar wrapped inside
+.\build-mcp.ps1 -Single         # one exe, jar wrapped inside (-Jar is implied)
 ```
+
+- **`-Exe` and `-Single` imply `-Jar`** because both wrap the fat jar. Before that was made
+  explicit, `-Single` on its own compiled the sources and then wrapped the jar an earlier run
+  had left in `build/dist`: an exe built that way served **54 tools** while the tree beside it
+  had 56 (the jar inside it has no `mcp/Appearance*.class`, and a `SelfTest` with 14 checks
+  instead of 15). The script now builds the jar whenever an exe is asked for, and a plain
+  compile says so when a leftover jar predates the classes just compiled - running such a jar
+  reports the older build's tool set, which is indistinguishable from a broken build.
 
 - The **project root must be on the runtime classpath** (`-cp "build\classes;.;libs/*"`): locale bundles are
   looked up as `resources/logisim/...`, and without it every open answers *"No locale bundles are
@@ -496,8 +581,8 @@ cd Logisim-Fork
 
 | Path | What |
 |---|---|
-| `Logisim-Fork/com/cburch/logisim/mcp/` | protocol, server, transports, session, instructions, port fixups, documentation reader (21 files) |
-| `Logisim-Fork/com/cburch/logisim/mcp/tools/` | the 48 tools (13 files) |
+| `Logisim-Fork/com/cburch/logisim/mcp/` | protocol, server, transports, session, instructions, port fixups, documentation reader, appearance (23 files) |
+| `Logisim-Fork/com/cburch/logisim/mcp/tools/` | the 56 tools (17 files) |
 | `Logisim-Fork/build-mcp.ps1` | build, run and packaging |
 | `Logisim-Fork/MCP.md` | tool reference, transports, guarantees, limitations, packaging notes |
 | `Logisim-Fork/libs/gson-2.8.9.jar` | JSON dependency that 2.15.0.1 did not have |

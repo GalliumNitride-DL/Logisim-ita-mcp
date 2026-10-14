@@ -17,6 +17,7 @@ import java.util.List;
 import com.cburch.logisim.circuit.Circuit;
 import com.cburch.logisim.circuit.SubcircuitFactory;
 import com.cburch.logisim.comp.Component;
+import com.cburch.logisim.gui.appear.AppearanceCanvas;
 import com.cburch.logisim.gui.main.Canvas;
 import com.cburch.logisim.gui.main.Frame;
 import com.cburch.logisim.gui.main.Selection;
@@ -24,6 +25,7 @@ import com.cburch.logisim.gui.main.SelectionBridge;
 import com.cburch.logisim.proj.Project;
 import com.cburch.logisim.proj.ProjectActions;
 import com.cburch.logisim.proj.Projects;
+import com.cburch.draw.model.CanvasObject;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -104,8 +106,8 @@ public final class GuiBridge {
 
 	/**
 	 * What the user sees, described for an agent: one entry per window, with the file
-	 * it came from, whether it has unsaved changes, which circuit is on screen, and
-	 * which window has the focus.
+	 * it came from, whether it has unsaved changes, which circuit is on screen, which
+	 * view that window is showing, and which window has the focus.
 	 */
 	public static JsonArray describeWindows(McpSession session) {
 		Frame focused = focusedFrame();
@@ -126,7 +128,10 @@ public final class GuiBridge {
 			if (current != null) {
 				window.addProperty("current_circuit", current.getName());
 			}
-			List<String> selected = selection(session, project);
+			window.addProperty("view", view(frame));
+			boolean appearanceView = Frame.EDIT_APPEARANCE.equals(frame.getEditorView());
+			List<String> selected = appearanceView ? appearanceSelection(project) : selection(session, project);
+			window.addProperty("selection_of", appearanceView ? "appearance" : "circuit");
 			window.addProperty("selection_count", selected.size());
 			if (selected.size() > 0) {
 				window.add("selection", toJson(selected));
@@ -134,6 +139,23 @@ public final class GuiBridge {
 			ret.add(window);
 		}
 		return ret;
+	}
+
+	/**
+	 * Which of the two views a window is showing, named the way the tool that switches
+	 * it names them: the circuit's schematic, or its appearance (its symbol). Together
+	 * with {@code current_circuit} this says what the user is looking at, which is what
+	 * {@link #showAppearance} changes and what an agent has to be able to check.
+	 */
+	public static String view(Frame frame) {
+		if (frame == null) {
+			return "unknown";
+		}
+		String view = frame.getEditorView();
+		if (Frame.EDIT_APPEARANCE.equals(view)) {
+			return "appearance (the symbol of this circuit, as Project | Edit Circuit Appearance shows it)";
+		}
+		return Frame.EDIT_LAYOUT.equals(view) ? "circuit (the schematic)" : String.valueOf(view);
 	}
 
 	/** Brings a window and (if given) one of its circuits to the front. */
@@ -183,7 +205,94 @@ public final class GuiBridge {
 		select(project, null);
 	}
 
-	/** The ids of the currently selected components, for reporting. */
+	/**
+	 * Shows the user a circuit's <i>appearance</i> - the symbol it is drawn as inside another
+	 * circuit - because that is the one thing an agent can change that the ordinary canvas does
+	 * not show at all: Logisim draws a symbol only in its appearance view (Project | Edit
+	 * Circuit Appearance), so leaving the window on the canvas after such an edit would hide
+	 * the work from the user completely.
+	 *
+	 * <p>
+	 * The circuit is made current first, because switching circuit puts the window back on the
+	 * canvas view; then the view is switched, and whatever the call changed is selected so it
+	 * stands out. The window is not raised: the user may be looking at another project on
+	 * purpose, and {@code logisim_gui_focus} is there for when they should be interrupted.
+	 * </p>
+	 *
+	 * @return a line for the tool result, or null when there is no window to show it in
+	 */
+	public static String showAppearance(Project project, Circuit circuit, List<CanvasObject> touched) {
+		Frame frame = frameFor(project);
+		if (frame == null || circuit == null) {
+			return null;
+		}
+		if (project.getCurrentCircuit() != circuit) {
+			project.setCurrentCircuit(circuit);
+		}
+		frame.setEditorView(Frame.EDIT_APPEARANCE);
+		AppearanceCanvas canvas = appearanceCanvas(frame.getContentPane());
+		if (canvas != null) {
+			com.cburch.draw.canvas.Selection selection = canvas.getSelection();
+			if (selection != null) {
+				selection.clearSelected();
+				List<CanvasObject> present = new ArrayList<CanvasObject>();
+				List<CanvasObject> now = circuit.getAppearance().getObjectsFromBottom();
+				if (touched != null) {
+					for (CanvasObject object : touched) {
+						for (CanvasObject current : now) {
+							if (current == object) {
+								present.add(object);
+								break;
+							}
+						}
+					}
+				}
+				if (!present.isEmpty()) {
+					selection.setSelected(present, true);
+				}
+			}
+			canvas.repaint();
+		}
+		return "The window is now showing the appearance (the symbol) of circuit '" + circuit.getName()
+				+ "', with what changed selected; Project | Edit Circuit Appearance or the canvas button "
+				+ "returns to the circuit.";
+	}
+
+	/**
+	 * The appearance canvas of a window, found in its component tree: the view is built the
+	 * first time it is shown and Logisim never exposes it, so this walks the window looking for
+	 * the canvas class instead of reaching into a field.
+	 */
+	private static AppearanceCanvas appearanceCanvas(java.awt.Container container) {
+		if (container == null) {
+			return null;
+		}
+		java.awt.Component[] children = container.getComponents();
+		for (java.awt.Component child : children) {
+			if (child instanceof AppearanceCanvas) {
+				return (AppearanceCanvas) child;
+			}
+		}
+		for (java.awt.Component child : children) {
+			if (child instanceof java.awt.Container) {
+				AppearanceCanvas found = appearanceCanvas((java.awt.Container) child);
+				if (found != null) {
+					return found;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The ids of the currently selected components, for reporting.
+	 *
+	 * <p>
+	 * This is the selection of the <i>circuit</i> canvas, which is not necessarily the one the
+	 * user is looking at: {@link #view} says which view a window is showing, and
+	 * {@link #appearanceSelection} describes the other one.
+	 * </p>
+	 */
 	public static List<String> selection(McpSession session, Project project) {
 		List<String> ret = new ArrayList<String>();
 		Frame frame = frameFor(project);
@@ -200,6 +309,34 @@ public final class GuiBridge {
 			} catch (Throwable t) {
 				ret.add(comp.getFactory().getName());
 			}
+		}
+		return ret;
+	}
+
+	/**
+	 * The objects the appearance canvas has selected, named the way the appearance tools name
+	 * them ({@code "a6:rect"}). Reported instead of the component selection when the window is
+	 * showing an appearance, because that is the one the user can see - and a call that edits an
+	 * appearance selects what it changed.
+	 */
+	public static List<String> appearanceSelection(Project project) {
+		List<String> ret = new ArrayList<String>();
+		Frame frame = frameFor(project);
+		Circuit circuit = project == null ? null : project.getCurrentCircuit();
+		if (frame == null || circuit == null) {
+			return ret;
+		}
+		AppearanceCanvas canvas = appearanceCanvas(frame.getContentPane());
+		if (canvas == null || canvas.getSelection() == null) {
+			return ret;
+		}
+		java.util.Set<CanvasObject> objects = canvas.getSelection().getSelected();
+		if (objects == null) {
+			return ret;
+		}
+		for (CanvasObject object : objects) {
+			String name = Appearance.nameOf(circuit, object);
+			ret.add((name == null ? "?" : name) + ":" + Appearance.kindOf(object));
 		}
 		return ret;
 	}

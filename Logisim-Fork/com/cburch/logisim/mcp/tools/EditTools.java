@@ -317,13 +317,24 @@ public final class EditTools {
 		boolean lenient = !"fail".equalsIgnoreCase(spec.optString("on_unknown_attribute", "warn"));
 
 		JsonObject extra = spec.optObject("attributes");
+		// A Splitter's per-bit attributes are recreated whenever 'incoming' or 'fanout' is set,
+		// and setting them on the attribute set before the component exists loses them to
+		// Logisim's own defaults: a 32-bit two-way splitter asked for 5/27 came back as 16/16,
+		// and a 'bit_ranges' asking for 5/27 came back as an even 11/11/10. They are therefore
+		// applied to the component itself, after it has been created - the same two steps a
+		// caller had to discover by hand, in one call and one undo step.
+		Map<String, JsonElement> deferredBits = new java.util.LinkedHashMap<String, JsonElement>();
 		JsonElement ranges = extra == null ? null : extra.get("bit_ranges");
 		if (ranges != null && ranges.isJsonObject()) {
-			expandBitRanges(session, attrs, factory, ranges.getAsJsonObject(), ignored, lenient);
+			expandBitRanges(session, attrs, factory, ranges.getAsJsonObject(), ignored, lenient, deferredBits);
 			extra.remove("bit_ranges");
 		}
 		if (extra != null) {
 			for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
+				if (isBitAttribute(entry.getKey())) {
+					deferredBits.put(entry.getKey(), entry.getValue());
+					continue;
+				}
 				String ignoredName = applyAttribute(session, attrs, factory, entry.getKey(), entry.getValue(), lenient);
 				if (ignoredName != null) {
 					ignored.add(ignoredName);
@@ -370,8 +381,72 @@ public final class EditTools {
 			}
 			portIndex++;
 		}
+		// The component's attributes have to be final before it enters the circuit: the circuit
+		// reads its ports at that moment, which for a splitter is what the bit attributes decide.
+		applyDeferredBits(session, component, deferredBits, factory, ignored, lenient, warnings);
 		mutation.add(component);
 		return component;
+	}
+
+	/** True for the per-bit attributes a splitter has: 'bit0', 'bit1', and so on. */
+	private static boolean isBitAttribute(String name) {
+		if (name == null || !name.startsWith("bit") || name.length() == 3) {
+			return false;
+		}
+		for (int i = 3; i < name.length(); i++) {
+			if (!Character.isDigit(name.charAt(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** True for the attributes that decide a splitter's shape, which have to be applied first. */
+	private static boolean isStructuralAttribute(String name) {
+		return "incoming".equals(name) || "fanout".equals(name);
+	}
+
+	/**
+	 * Applies the attributes that only survive on the component itself, before it is added to the
+	 * circuit.
+	 *
+	 * <p>
+	 * A splitter's per-bit attributes are the ones that matter here: Logisim recreates them from
+	 * 'incoming' and 'fanout', so a value put on the attribute set before the shape is set - or a
+	 * bit number outside 1..fanout - is replaced by the default even split without a word. Setting
+	 * them on the component, after the shape and before the add, is what makes the split take; the
+	 * value that came out is compared with the value asked for, because "I asked for 5 and it says
+	 * 16" is the one thing a caller has to be told.
+	 * </p>
+	 */
+	private static void applyDeferredBits(McpSession session, Component component,
+			Map<String, JsonElement> deferred, ComponentFactory factory, List<String> ignored, boolean lenient,
+			JsonArray warnings) {
+		if (deferred.isEmpty()) {
+			return;
+		}
+		AttributeSet attrs = component.getAttributeSet();
+		for (Map.Entry<String, JsonElement> entry : deferred.entrySet()) {
+			Attribute<?> attribute = attrs.getAttribute(entry.getKey());
+			if (attribute == null) {
+				if (lenient) {
+					ignored.add(entry.getKey());
+					continue;
+				}
+				throw new McpException("a " + factory.getName() + " has no attribute '" + entry.getKey()
+						+ "'; its attributes are: " + CatalogTools.attributeNames(attrs));
+			}
+			Object value = session.attributeFromJson(attrs, attribute, entry.getValue());
+			setValue(attrs, attribute, value);
+			Object effective = attrs.getValue(attribute);
+			if (effective != null && value != null && !String.valueOf(value).equals(String.valueOf(effective))) {
+				warnings.add("'" + entry.getKey() + "' was asked for " + value + " but reads " + effective
+						+ ": Logisim recreates a splitter's bit attributes from 'incoming' and 'fanout', and a bit "
+						+ "number that is not one of the 1..fanout outputs is replaced by the default, so the split "
+						+ "fell back to an even one. The 'split' in this reply shows what came out; 'bit_ranges' "
+						+ "numbers the outputs from 0 and avoids the two-step");
+			}
+		}
 	}
 
 	/**
@@ -630,24 +705,30 @@ public final class EditTools {
 	}
 
 	/**
-	 * Warns when an endpoint of a path touches neither a port nor a wire that already
-	 * existed, and names the port it most likely meant. A stub is not an error - people draw
-	 * them - but it is the signature of a coordinate worked out by hand, and the nearest port
-	 * is nearly always the one that was wanted.
+	 * Warns when an endpoint of a path touches neither a port nor a wire, and names the port it
+	 * most likely meant. A stub is not an error - people draw them - but it is the signature of a
+	 * coordinate worked out by hand, and the nearest port is nearly always the one that was
+	 * wanted.
+	 *
+	 * <p>
+	 * The wires are the ones the call <i>leaves behind</i>, not the ones that existed before it:
+	 * judging a T-joint against the wiring of an earlier moment reported a correct batch as
+	 * connecting nothing, purely because the trunk happened to be drawn after the branch.
+	 * </p>
 	 */
 	private static void warnIfConnectsNothing(McpSession session, Circuit circuit, java.util.Set<Location> ports,
-			List<Wire> wiresBefore, Location loc, JsonArray warnings, boolean sharedWithinCall) {
+			List<Wire> wires, Location loc, JsonArray warnings, boolean sharedWithinCall) {
 		if (sharedWithinCall || ports.contains(loc)) {
 			return;
 		}
-		for (Wire wire : wiresBefore) {
+		for (Wire wire : wires) {
 			if (wire.contains(loc)) {
 				return;
 			}
 		}
 		String near = session.describeNearestPort(circuit, loc, 30);
-		warnings.add("an endpoint at " + loc + " is not a port and does not touch any wire that was already there, so "
-				+ "it connects nothing" + (near == null ? "" : "; " + near));
+		warnings.add("an endpoint at " + loc + " is not a port and touches no wire, so it connects nothing"
+				+ (near == null ? "" : "; " + near));
 	}
 
 	/** True when nothing about a segment would connect two unintended nets. */
@@ -693,11 +774,12 @@ public final class EditTools {
 	 * output 0 - two attributes instead of the thirty-two a caller would otherwise need. Outputs
 	 * are numbered from 0 in the shorthand; Logisim stores them from 1, and this is the one place
 	 * that converts. The width is applied first, because the per-bit attributes only exist up to
-	 * the input width.
+	 * the input width. The bits themselves are handed back in {@code deferred} rather than set:
+	 * they only survive on the component itself, after it exists (see {@code placeOne}).
 	 * </p>
 	 */
 	private static void expandBitRanges(McpSession session, AttributeSet attrs, ComponentFactory factory,
-			JsonObject ranges, List<String> ignored, boolean lenient) {
+			JsonObject ranges, List<String> ignored, boolean lenient, Map<String, JsonElement> deferred) {
 		if (attrs.getAttribute("bit0") == null) {
 			ignored.add("bit_ranges (this component has no per-bit attributes; only a splitter does)");
 			return;
@@ -740,9 +822,8 @@ public final class EditTools {
 				"the input width");
 		applyRangeAttribute(session, attrs, factory, "fanout", fanout, lenient, ignored, "the fan out");
 		for (Map.Entry<Integer, Integer> entry : bits.entrySet()) {
-			applyRangeAttribute(session, attrs, factory, "bit" + entry.getKey(),
-					entry.getValue().intValue() + 1, lenient, ignored,
-					"the output for bit " + entry.getKey());
+			deferred.put("bit" + entry.getKey(),
+					new JsonPrimitive(Integer.valueOf(entry.getValue().intValue() + 1)));
 		}
 	}
 
@@ -876,7 +957,21 @@ public final class EditTools {
 				AttributeSet attrs = component.getAttributeSet();
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				JsonArray applied = new JsonArray();
+				// 'incoming' and 'fanout' first, whatever order they were written in: they recreate a
+				// splitter's per-bit attributes, so a call that gives both used to lose the bit values
+				// whenever it named them before the shape.
+				List<Map.Entry<String, JsonElement>> ordered = new ArrayList<Map.Entry<String, JsonElement>>();
 				for (Map.Entry<String, JsonElement> entry : requested.entrySet()) {
+					if (isStructuralAttribute(entry.getKey())) {
+						ordered.add(entry);
+					}
+				}
+				for (Map.Entry<String, JsonElement> entry : requested.entrySet()) {
+					if (!isStructuralAttribute(entry.getKey())) {
+						ordered.add(entry);
+					}
+				}
+				for (Map.Entry<String, JsonElement> entry : ordered) {
 					String name = entry.getKey();
 					Attribute<?> attribute = attrs.getAttribute(name);
 					if (attribute == null) {
@@ -949,8 +1044,9 @@ public final class EditTools {
 
 				java.util.Set<Location> ports = session.portLocations(circuit);
 				java.util.Set<Wire> existing = new java.util.HashSet<Wire>(circuit.getWires());
-				// The wires as they are now, before this call adds any: an endpoint that only the
-				// wire we are about to draw touches is still an endpoint that connects nothing.
+				// The wires as they are now, before this call adds any. Kept apart from
+				// 'wiresAfter' only so that a join can say whether the wire it landed on was
+				// already there or was drawn by this same call.
 				List<Wire> wiresBefore = new ArrayList<Wire>(circuit.getWires());
 				CircuitMutation mutation = new CircuitMutation(circuit);
 				JsonArray ids = new JsonArray();
@@ -995,6 +1091,13 @@ public final class EditTools {
 						session.noteTouched(wire);
 					}
 				}
+				// What this call leaves behind: what was there before, plus what it drew. The
+				// endpoint checks below run against this, so a branch that ties into a trunk the
+				// same call drew is a T-joint (and is reported as one) rather than something that
+				// "connects nothing". A dry run is judged the same way, against the wires it would
+				// leave behind.
+				List<Wire> wiresAfter = new ArrayList<Wire>(wiresBefore);
+				wiresAfter.addAll(createdWires);
 				// Endpoints that connect nothing: the mistake an agent makes when it works a
 				// coordinate out by hand instead of asking for the port.
 				Map<Location, Integer> endpoints = new java.util.LinkedHashMap<Location, Integer>();
@@ -1005,7 +1108,7 @@ public final class EditTools {
 					}
 				}
 				for (Map.Entry<Location, Integer> entry : endpoints.entrySet()) {
-					warnIfConnectsNothing(session, circuit, ports, wiresBefore, entry.getKey(), warnings,
+					warnIfConnectsNothing(session, circuit, ports, wiresAfter, entry.getKey(), warnings,
 							entry.getValue().intValue() > 1);
 				}
 
@@ -1032,6 +1135,24 @@ public final class EditTools {
 							addJoin(session, circuit, joins, seenJoins, createdWire.getEnd0(), wire,
 									"the new segment " + createdWire.getEnd0() + " -> " + createdWire.getEnd1()
 												+ " lies on wire " + session.idOf(wire));
+						}
+					}
+				}
+				// A joint within the call itself: an endpoint that lands on a wire this same call
+				// drew is a T into a net the call has just made, which is worth naming for the same
+				// reason as any other join. Ports are skipped - a wire ending on a port is how a
+				// wire is supposed to connect - and a dry run reports the join it would make.
+				for (List<Location> path : paths) {
+					for (Location point : new Location[] { path.get(0), path.get(path.size() - 1) }) {
+						if (ports.contains(point)) {
+							continue;
+						}
+						for (Wire createdWire : createdWires) {
+							if (createdWire.contains(point)) {
+								addJoin(session, circuit, joins, seenJoins, point, createdWire,
+										"an endpoint lands on wire " + session.idOf(createdWire)
+												+ ", which this same call drew");
+							}
 						}
 					}
 				}

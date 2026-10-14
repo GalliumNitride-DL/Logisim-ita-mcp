@@ -140,6 +140,23 @@ public class McpSession implements Closeable {
 	private final List<Component> touched = new ArrayList<Component>();
 
 	/**
+	 * Objects of a circuit appearance the current call changed, and the circuit they belong to.
+	 * In live mode these are what the window is switched to: a symbol is only visible in the
+	 * appearance view, so an appearance edit that left the user on the canvas would show them
+	 * nothing at all.
+	 */
+	private final List<com.cburch.draw.model.CanvasObject> touchedAppearance = new ArrayList<com.cburch.draw.model.CanvasObject>();
+
+	/**
+	 * Set when a call had to stop a simulator that was running. Logisim's simulator starts
+	 * running by default and its own thread propagates whatever is dirty; a tool call that
+	 * propagates at the same moment puts two threads inside one propagator and corrupts its
+	 * queue. See {@link #quietSimulator()}.
+	 */
+	private boolean stoppedSimulator;
+	private Circuit appearanceCircuit;
+
+	/**
 	 * Set by the user (through the MCP window, or the tools meanwhile) to restrain the agent.
 	 * A pause set from the window can only be released there: the agent must not be able to
 	 * remove the user's brake.
@@ -240,34 +257,92 @@ public class McpSession implements Closeable {
 	 */
 	public String finishCall() {
 		if (!live) {
-			touched.clear();
+			forgetTouched();
 			return null;
 		}
 		try {
-			if (touched.isEmpty()) {
-				return null;
+			String appearance = showTouchedAppearance();
+			String components = highlightTouched();
+			if (appearance == null) {
+				return components;
 			}
-			Circuit displayed = project == null ? null : project.getCurrentCircuit();
-			Circuit edited = null;
-			for (Component comp : touched) {
-				edited = circuitHolding(comp);
-				break;
-			}
-			if (edited != null && edited == displayed && allIn(edited, touched)) {
-				GuiBridge.select(project, new ArrayList<Component>(touched));
-				return null;
-			}
-			String where = edited == null ? "a circuit that is no longer open" : "'" + edited.getName() + "'";
-			String showing = displayed == null ? "nothing" : "'" + displayed.getName() + "'";
-			return "the edits are in circuit " + where + ", but the window is showing " + showing
-					+ ", so nothing was highlighted: highlighting one circuit's parts over another's would show the "
-					+ "user something that is not there. Call logisim_circuit_select with circuit " + where
-					+ " to bring it to the front.";
+			return components == null ? appearance : components + " " + appearance;
 		} catch (Throwable t) {
-			// highlighting is a courtesy: never fail a call over it
+			// showing the user what happened is a courtesy: never fail a call over it
 			return null;
 		} finally {
-			touched.clear();
+			forgetTouched();
+		}
+	}
+
+	private void forgetTouched() {
+		touched.clear();
+		touchedAppearance.clear();
+		appearanceCircuit = null;
+		// per call, like the touches: the next call starts with nothing to report, so
+		// 'simulator_stopped' can only ever mean "this call stopped one"
+		stoppedSimulator = false;
+	}
+
+	/** Puts what the call changed into the selection, or explains why it cannot be shown. */
+	private String highlightTouched() {
+		if (touched.isEmpty()) {
+			return null;
+		}
+		Circuit displayed = project == null ? null : project.getCurrentCircuit();
+		Circuit edited = null;
+		for (Component comp : touched) {
+			edited = circuitHolding(comp);
+			break;
+		}
+		if (edited != null && edited == displayed && allIn(edited, touched)) {
+			GuiBridge.select(project, new ArrayList<Component>(touched));
+			return null;
+		}
+		String where = edited == null ? "a circuit that is no longer open" : "'" + edited.getName() + "'";
+		String showing = displayed == null ? "nothing" : "'" + displayed.getName() + "'";
+		return "the edits are in circuit " + where + ", but the window is showing " + showing
+				+ ", so nothing was highlighted: highlighting one circuit's parts over another's would show the "
+				+ "user something that is not there. Call logisim_circuit_select with circuit " + where
+				+ " to bring it to the front.";
+	}
+
+	/**
+	 * In live mode, turns the window to the symbol an appearance edit just changed. A symbol is
+	 * only drawn in Logisim's appearance view, so this is the one case where a call moves the
+	 * view deliberately: without it the user would be looking at the circuit canvas while the
+	 * agent arranged something they cannot see.
+	 */
+	private String showTouchedAppearance() {
+		if (touchedAppearance.isEmpty() || appearanceCircuit == null || project == null) {
+			return null;
+		}
+		return GuiBridge.showAppearance(project, appearanceCircuit,
+				new ArrayList<com.cburch.draw.model.CanvasObject>(touchedAppearance));
+	}
+
+	/**
+	 * Applies a change to a circuit's appearance as one undoable action, and remembers what it
+	 * changed so that a live window can be switched to the symbol it belongs to.
+	 */
+	public void commitAppearance(Circuit circuit,
+			com.cburch.logisim.proj.Action action,
+			java.util.Collection<? extends com.cburch.draw.model.CanvasObject> changed) {
+		requireOpen();
+		if (action == null) {
+			return;
+		}
+		project.doAction(action);
+		if (!live || changed == null) {
+			return;
+		}
+		for (com.cburch.draw.model.CanvasObject object : changed) {
+			if (object != null) {
+				touchedAppearance.add(object);
+			}
+		}
+		if (!touchedAppearance.isEmpty()) {
+			appearanceCircuit = circuit;
 		}
 	}
 
@@ -702,11 +777,67 @@ public class McpSession implements Closeable {
 	}
 
 	/**
+	 * Stops the simulator of the project, and remembers that it had to be done.
+	 *
+	 * <p>
+	 * {@code Simulator.isRunning} defaults to true, and Logisim's own {@code PropagationManager}
+	 * thread propagates whatever is dirty. A tool call that propagates or reads at the same
+	 * moment therefore puts two threads inside one {@code Propagator}, and that corrupts its
+	 * priority queue: the symptom is a {@code NullPointerException} from
+	 * {@code Propagator$SetData.compareTo} inside {@code PriorityQueue.poll}, and reads that look
+	 * like the previous vector. In live mode the window keeps whatever the user chose - F5,
+	 * {@code Simulate | Run} and the simulation toolbar all start the ticker again - so a call
+	 * that is about to propagate or read stops it first, and says so with
+	 * {@link #noteStoppedSimulator}.
+	 * </p>
+	 *
+	 * @return true when a running simulator had to be stopped
+	 */
+	public boolean quietSimulator() {
+		if (project == null) {
+			return false;
+		}
+		com.cburch.logisim.circuit.Simulator simulator = project.getSimulator();
+		if (simulator == null || !simulator.isRunning()) {
+			return false;
+		}
+		simulator.setIsRunning(false);
+		this.stoppedSimulator = true;
+		return true;
+	}
+
+	/** True when this call had to stop a simulator that was running. */
+	public boolean stoppedSimulator() {
+		return stoppedSimulator;
+	}
+
+	/**
+	 * Says, in a result, that a running simulator was stopped so that the call stayed
+	 * deterministic. A call that had nothing to stop stays quiet.
+	 */
+	public void noteStoppedSimulator(JsonObject target) {
+		if (!stoppedSimulator || target == null) {
+			return;
+		}
+		target.addProperty("simulator_stopped", Boolean.TRUE);
+		target.addProperty("simulator_stopped_note", "Logisim's simulator was running, so it was stopped before "
+				+ "anything was propagated or read: its own thread propagates whatever is dirty, and two threads "
+				+ "inside one propagator corrupt its queue, which shows up as a read that looks like the previous "
+				+ "vector, or as a NullPointerException. Press F5 (or Simulate | Run) in the window to run it again");
+	}
+
+	/**
 	 * The simulation state of any circuit of the project. Logisim keeps one state per
 	 * circuit, so values survive switching between circuits, exactly as in the GUI.
+	 *
+	 * <p>
+	 * Reading a state is also the moment the window's simulator is put to sleep
+	 * ({@link #quietSimulator()}), because everything a tool does with a state starts here.
+	 * </p>
 	 */
 	public CircuitState stateFor(Circuit circuit) {
 		requireOpen();
+		quietSimulator();
 		if (circuit == null) {
 			throw new McpException("a circuit is required");
 		}
@@ -1135,6 +1266,17 @@ public class McpSession implements Closeable {
 			}
 			if (found == null) {
 				throw unknownComponent(text, circuit);
+			}
+			return found;
+		}
+		if (reference.isJsonArray()) {
+			// [x, y] - the short form for a location, which the tool descriptions promise as a
+			// component reference. It is unambiguous: an id and a label are strings.
+			Location loc = parseLocation(reference);
+			Component found = componentAt(circuit, loc);
+			if (found == null) {
+				throw new McpException("no component at " + loc + " in circuit '" + circuit.getName()
+						+ "'; pass a component id, a label, or {\"loc\": [x, y]}");
 			}
 			return found;
 		}
@@ -1978,7 +2120,90 @@ public class McpSession implements Closeable {
 			}
 			ret.add("ports", ports);
 		}
+		JsonObject split = splitOf(comp);
+		if (split != null) {
+			ret.add("split", split);
+		}
 		return ret;
+	}
+
+	/**
+	 * The split a component with per-bit attributes actually makes: which input bits each fan-out
+	 * output carries, and how wide each one is.
+	 *
+	 * <p>
+	 * Reported beside the attributes because the split a caller asked for and the split it got are
+	 * not always the same thing. Logisim recreates a splitter's bit attributes whenever the shape
+	 * ('incoming', 'fanout') changes, and a bit number outside 1..fanout is quietly replaced by the
+	 * default, so a call that meant 5/27 can end up with an even 16/16 and no error anywhere. The
+	 * bit attributes alone do not show that; the split does.
+	 * </p>
+	 *
+	 * @return the split, or null for a component that has no per-bit attributes
+	 */
+	private static JsonObject splitOf(Component comp) {
+		AttributeSet attrs = comp.getAttributeSet();
+		if (attrs.getAttribute("bit0") == null) {
+			return null;
+		}
+		java.util.TreeMap<Integer, Integer> bits = new java.util.TreeMap<Integer, Integer>();
+		for (int i = 0; i < 1024; i++) {
+			Attribute<?> attribute = attrs.getAttribute("bit" + i);
+			if (attribute == null) {
+				break;
+			}
+			Object value = attrs.getValue(attribute);
+			if (value instanceof Integer) {
+				bits.put(Integer.valueOf(i), (Integer) value);
+			}
+		}
+		if (bits.isEmpty()) {
+			return null;
+		}
+		java.util.TreeMap<Integer, java.util.List<Integer>> outputs = new java.util.TreeMap<Integer, java.util.List<Integer>>();
+		for (Map.Entry<Integer, Integer> entry : bits.entrySet()) {
+			java.util.List<Integer> group = outputs.get(entry.getValue());
+			if (group == null) {
+				group = new java.util.ArrayList<Integer>();
+				outputs.put(entry.getValue(), group);
+			}
+			group.add(entry.getKey());
+		}
+		JsonObject ret = new JsonObject();
+		ret.addProperty("incoming", Integer.valueOf(bits.lastKey().intValue() + 1));
+		ret.addProperty("fanout", Integer.valueOf(outputs.lastKey().intValue()));
+		JsonArray groups = new JsonArray();
+		for (Map.Entry<Integer, java.util.List<Integer>> entry : outputs.entrySet()) {
+			JsonObject group = new JsonObject();
+			group.addProperty("output", entry.getKey());
+			group.addProperty("bits", bitRanges(entry.getValue()));
+			group.addProperty("width", Integer.valueOf(entry.getValue().size()));
+			groups.add(group);
+		}
+		ret.add("outputs", groups);
+		ret.addProperty("note", "this is what the bit attributes come to: each fan-out output, the input bits it "
+				+ "carries and how wide it is. Logisim numbers the outputs from 1, while 'bit_ranges' numbers them "
+				+ "from 0");
+		return ret;
+	}
+
+	/** A run of bit numbers as text: "0-4, 8, 12-31". */
+	private static String bitRanges(java.util.List<Integer> sorted) {
+		StringBuilder buf = new StringBuilder();
+		int start = sorted.get(0).intValue();
+		int previous = start;
+		for (int i = 1; i <= sorted.size(); i++) {
+			int value = i < sorted.size() ? sorted.get(i).intValue() : Integer.MIN_VALUE;
+			if (value != previous + 1) {
+				if (buf.length() > 0) {
+					buf.append(", ");
+				}
+				buf.append(start == previous ? String.valueOf(start) : start + "-" + previous);
+				start = value;
+			}
+			previous = value;
+		}
+		return buf.toString();
 	}
 
 	/**
@@ -2432,6 +2657,13 @@ public class McpSession implements Closeable {
 			ret.addProperty("hint", "bus width in bits");
 		} else if (value instanceof Integer) {
 			ret.addProperty("type", "int");
+			if (attr.getName().startsWith("bit") && attrs.getAttribute("fanout") != null
+					&& attr.getName().length() > 3) {
+				ret.addProperty("hint", "which fan-out output this input bit goes to, numbered from 1; Logisim "
+						+ "recreates these when 'incoming' or 'fanout' changes, and a number that is not one of the "
+						+ "outputs is replaced by the default - so give the shape first, or pass 'bit_ranges' "
+						+ "({\"0-4\": 0, \"5-31\": 1}, outputs numbered from 0) when the component is placed");
+			}
 		} else if (value instanceof AttributeOption) {
 			ret.addProperty("type", "option");
 		} else if (value instanceof String) {
@@ -2779,6 +3011,33 @@ public class McpSession implements Closeable {
 
 	public static JsonObject errorResult(String message) {
 		return Json.object("error", message);
+	}
+
+	/**
+	 * The place a failure came from, for an error message. A client may have no way to see the
+	 * server's log - a packaged exe started without {@code -Console} has no console at all - so
+	 * the first frame inside this project travels with the error: "NullPointerException" alone
+	 * names nothing, "circuit.Propagator$SetData.compareTo (Propagator.java:100)" names the
+	 * place. Frames outside the project (the AWT queue, reflection) are skipped, and null is
+	 * returned when there is none.
+	 */
+	public static String firstFrame(Throwable t) {
+		if (t == null || t.getStackTrace() == null) {
+			return null;
+		}
+		for (StackTraceElement element : t.getStackTrace()) {
+			String name = element.getClassName();
+			if (name.startsWith("com.cburch.logisim.")) {
+				name = name.substring("com.cburch.logisim.".length());
+			} else if (name.startsWith("com.cburch.")) {
+				name = name.substring("com.cburch.".length());
+			} else {
+				continue;
+			}
+			return name + "." + element.getMethodName() + " (" + element.getFileName() + ":"
+					+ element.getLineNumber() + ")";
+		}
+		return null;
 	}
 
 	public static String message(Throwable t) {

@@ -89,11 +89,11 @@ public final class SimTools {
 				ret.addProperty("set", Values.format(value));
 				ret.add("parsed", parsed(value, text));
 				if (ctx.optBool("propagate", true)) {
-					Propagator propagator = state.getPropagator();
-					propagator.propagate();
+					Propagator propagator = settle(session, state);
 					ret.addProperty("oscillating", Boolean.valueOf(propagator.isOscillating()));
 					addSignals(session, circuit, ret);
 				}
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -120,8 +120,7 @@ public final class SimTools {
 					applied.add(entry.getKey());
 					understood.add(entry.getKey(), parsed(value, text));
 				}
-				Propagator propagator = state.getPropagator();
-				propagator.propagate();
+				Propagator propagator = settle(session, state);
 
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());
@@ -130,6 +129,7 @@ public final class SimTools {
 				ret.addProperty("parsed_note", PARSED_NOTE);
 				ret.addProperty("oscillating", Boolean.valueOf(propagator.isOscillating()));
 				addSignals(session, circuit, ret);
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -182,6 +182,7 @@ public final class SimTools {
 				ret.addProperty("circuit", circuit.getName());
 				ret.addProperty("tick_count", state.getPropagator().getTickCount());
 				ret.add("values", values);
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -214,6 +215,7 @@ public final class SimTools {
 				ret.addProperty("oscillating", Boolean.valueOf(state.getPropagator().isOscillating()));
 				addSignals(session, circuit, ret);
 				ret.add("pins", pins);
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -227,13 +229,13 @@ public final class SimTools {
 				session.requireOpen();
 				Circuit circuit = session.circuitByName(ctx.optString("circuit", null));
 				CircuitState state = session.stateFor(circuit);
-				Propagator propagator = state.getPropagator();
-				propagator.propagate();
+				Propagator propagator = settle(session, state);
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());
 				ret.addProperty("oscillating", Boolean.valueOf(propagator.isOscillating()));
 				ret.addProperty("tick_count", propagator.getTickCount());
 				addSignals(session, circuit, ret);
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -260,8 +262,10 @@ public final class SimTools {
 				int done = 0;
 				boolean clocked = false;
 				for (int i = 0; i < count; i++) {
+					session.quietSimulator();
 					clocked |= propagator.tick();
 					propagator.propagate();
+					session.quietSimulator();
 					done++;
 					if (propagator.isOscillating()) {
 						break;
@@ -279,6 +283,7 @@ public final class SimTools {
 					ret.add("note", Json.element("no Clock component fired; add a Clock (Wiring library) to a "
 							+ "circuit that should advance over time"));
 				}
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -370,8 +375,10 @@ public final class SimTools {
 				boolean anyClockFired = false;
 				boolean oscillating = propagator.isOscillating();
 				for (int i = 0; i < cycles && !oscillating; i++) {
+					session.quietSimulator();
 					anyClockFired |= propagator.tick();
 					propagator.propagate();
+					session.quietSimulator();
 					cyclesDone++;
 					Value[] current = snapshot(state, watched);
 					boolean changed = !same(previous, current);
@@ -406,6 +413,7 @@ public final class SimTools {
 							+ "(Wiring library) to a circuit that should change over time, or drive it with "
 							+ "logisim_sim_set_inputs and read it with logisim_sim_read_all"));
 				}
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -469,6 +477,7 @@ public final class SimTools {
 				JsonArray rows = new JsonArray();
 				int passed = 0;
 				int failed = 0;
+				int errors = 0;
 				int index = 0;
 				for (JsonObject vector : vectors) {
 					index++;
@@ -477,54 +486,73 @@ public final class SimTools {
 					if (Json.isPresent(vector, "name")) {
 						row.addProperty("name", vector.get("name").getAsString());
 					}
-					JsonObject values = Json.isPresent(vector, "values") ? vector.getAsJsonObject("values") : null;
-					if (values == null) {
-						throw new McpException("vector " + index + " has no 'values' object");
-					}
-					JsonObject applied = new JsonObject();
-					for (Map.Entry<String, JsonElement> entry : values.entrySet()) {
-						Instance pin = session.inputPinByName(circuit, entry.getKey());
-						Value value = Values.parse(entry.getValue().getAsString(), widthOf(pin));
-						drivePin(state, pin, value);
-						applied.add(entry.getKey(), Values.describe(value, radix));
-					}
-					Propagator propagator = state.getPropagator();
-					propagator.propagate();
-					row.add("applied", applied);
+					Propagator propagator = null;
+					try {
+						JsonObject values = Json.isPresent(vector, "values")
+								? vector.getAsJsonObject("values") : null;
+						if (values == null) {
+							throw new McpException("vector " + index + " has no 'values' object");
+						}
+						JsonObject applied = new JsonObject();
+						for (Map.Entry<String, JsonElement> entry : values.entrySet()) {
+							Instance pin = session.inputPinByName(circuit, entry.getKey());
+							Value value = Values.parse(entry.getValue().getAsString(), widthOf(pin));
+							drivePin(state, pin, value);
+							applied.add(entry.getKey(), Values.describe(value, radix));
+						}
+						propagator = settle(session, state);
+						row.add("applied", applied);
 
-					JsonObject expected = Json.isPresent(vector, "expect")
-							? vector.getAsJsonObject("expect") : null;
-					JsonObject observed = new JsonObject();
-					JsonArray mismatches = new JsonArray();
-					if (expected != null) {
-						for (Map.Entry<String, JsonElement> entry : expected.entrySet()) {
-							Instance pin = session.pinByName(circuit, entry.getKey());
-							if (pin == null) {
-								throw new McpException("vector " + index + " expects a pin called '" + entry.getKey()
-										+ "', which this circuit does not have");
+						JsonObject expected = Json.isPresent(vector, "expect")
+								? vector.getAsJsonObject("expect") : null;
+						JsonObject observed = new JsonObject();
+						JsonArray mismatches = new JsonArray();
+						if (expected != null) {
+							for (Map.Entry<String, JsonElement> entry : expected.entrySet()) {
+								Instance pin = session.pinByName(circuit, entry.getKey());
+								if (pin == null) {
+									throw new McpException("vector " + index + " expects a pin called '"
+											+ entry.getKey() + "', which this circuit does not have");
+								}
+								Value want = Values.parse(entry.getValue().getAsString(), widthOf(pin));
+								Value got = state.getValue(pin.getLocation());
+								observed.addProperty(entry.getKey(), read(got, radix));
+								if (!want.equals(got)) {
+									mismatches.add(entry.getKey() + ": expected " + read(want, radix) + ", read "
+											+ read(got, radix));
+								}
 							}
-							Value want = Values.parse(entry.getValue().getAsString(), widthOf(pin));
-							Value got = state.getValue(pin.getLocation());
-							observed.addProperty(entry.getKey(), read(got, radix));
-							if (!want.equals(got)) {
-								mismatches.add(entry.getKey() + ": expected " + read(want, radix) + ", read "
-										+ read(got, radix));
+							row.add("observed", observed);
+							row.addProperty("pass", Boolean.valueOf(mismatches.size() == 0));
+							if (mismatches.size() == 0) {
+								passed++;
+							} else {
+								failed++;
+								row.add("mismatches", mismatches);
 							}
 						}
-						row.add("observed", observed);
-						row.addProperty("pass", Boolean.valueOf(mismatches.size() == 0));
-						if (mismatches.size() == 0) {
-							passed++;
-						} else {
-							failed++;
-							row.add("mismatches", mismatches);
+						if (includeSignals) {
+							addSignals(session, circuit, row);
 						}
-					}
-					if (includeSignals) {
-						addSignals(session, circuit, row);
-					}
-					if (propagator.isOscillating()) {
-						row.addProperty("oscillating", Boolean.TRUE);
+						if (propagator.isOscillating()) {
+							row.addProperty("oscillating", Boolean.TRUE);
+						}
+					} catch (RuntimeException e) {
+						// One vector that cannot be evaluated must never take the batch with it: an
+						// exception used to lose every row, so the caller saw nothing but the
+						// exception. The vector is counted as failed and named, and the simulation
+						// is rebuilt so that the vectors after it run in a clean state - a
+						// propagator left inconsistent by a running simulator stays inconsistent.
+						errors++;
+						failed++;
+						row.addProperty("pass", Boolean.FALSE);
+						row.addProperty("error", McpSession.message(e));
+						row.addProperty("error_note", "this vector could not be evaluated at all; it is counted as "
+								+ "failed, and the other vectors were still run. A value that does not fit its pin, "
+								+ "a pin this circuit does not have, and a propagator left inconsistent by a running "
+								+ "simulator are all named here instead of failing the whole call");
+						session.resetSimulation(circuit);
+						state = session.stateFor(circuit);
 					}
 					rows.add(row);
 				}
@@ -536,11 +564,18 @@ public final class SimTools {
 					ret.addProperty("passed", Integer.valueOf(passed));
 					ret.addProperty("failed", Integer.valueOf(failed));
 				}
+				if (errors > 0) {
+					ret.addProperty("errors", Integer.valueOf(errors));
+				}
 				ret.add("rows", rows);
-				ret.addProperty("hint", failed > 0
-						? "the failing rows name the pins that disagreed; logisim_circuit_nets {problems_only: true} shows "
-								+ "which nets those pins sit on"
-						: "every vector that had an 'expect' matched");
+				ret.addProperty("hint", errors > 0
+						? "the rows carrying an 'error' could not be evaluated at all - the other vectors were still run, "
+								+ "so the fault is in those vectors or in what they name, not in the batch"
+						: failed > 0
+								? "the failing rows name the pins that disagreed; logisim_circuit_nets {problems_only: true} "
+										+ "shows which nets those pins sit on"
+								: "every vector that had an 'expect' matched");
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -572,7 +607,11 @@ public final class SimTools {
 				ret.addProperty("output_pin_count", session.outputPins(circuit).size());
 				ret.addProperty("background_simulator_running", Boolean.valueOf(session.project().getSimulator()
 						.isRunning()));
+				ret.addProperty("background_simulator_note", "Logisim's simulator starts running by default and its "
+						+ "own thread propagates whatever is dirty, so every call that propagates or reads stops it first "
+						+ "(two threads in one propagator corrupt its queue). F5 in the Logisim window starts it again");
 				addSignals(session, circuit, ret);
+				session.noteStoppedSimulator(ret);
 				return ret;
 			}
 		};
@@ -649,6 +688,21 @@ public final class SimTools {
 		InstanceState pinState = state.getInstanceState(pin);
 		Pin.FACTORY.setValue(pinState, value);
 		pinState.fireInvalidated();
+	}
+
+	/**
+	 * Propagates with the window's own simulator held still, and holds it still again
+	 * afterwards, so that nothing propagates behind the call's back. Logisim's simulator
+	 * thread and this call propagating at the same moment corrupt the propagator's queue
+	 * ({@link McpSession#quietSimulator()}), which is what makes a read look like the
+	 * previous vector or fail with a NullPointerException.
+	 */
+	private static Propagator settle(McpSession session, CircuitState state) {
+		session.quietSimulator();
+		Propagator propagator = state.getPropagator();
+		propagator.propagate();
+		session.quietSimulator();
+		return propagator;
 	}
 
 	/** The values of the watched signals right now, in the order they were asked for. */

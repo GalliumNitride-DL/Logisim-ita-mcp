@@ -383,6 +383,15 @@ public class McpServer {
 		if (message == null || message.isEmpty()) {
 			message = t.getClass().getName();
 		}
+		if (!(t instanceof McpException)) {
+			// A failure that was not a refusal has to say where it came from: the client may
+			// have no way to read the server's log (a packaged exe started without -Console has
+			// no console at all), and "NullPointerException" on its own names nothing at all.
+			String where = McpSession.firstFrame(t);
+			if (where != null) {
+				message = message + " (at " + where + ")";
+			}
+		}
 		JsonArray content = new JsonArray();
 		content.add(Json.object("type", "text", "text", message));
 		JsonObject ret = new JsonObject();

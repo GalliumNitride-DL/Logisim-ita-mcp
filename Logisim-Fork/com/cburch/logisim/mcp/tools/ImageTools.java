@@ -22,6 +22,7 @@ import com.cburch.logisim.circuit.Circuit;
 import com.cburch.logisim.circuit.CircuitState;
 import com.cburch.logisim.comp.ComponentDrawContext;
 import com.cburch.logisim.data.Bounds;
+import com.cburch.logisim.mcp.Appearance;
 import com.cburch.logisim.mcp.Json;
 import com.cburch.logisim.mcp.McpException;
 import com.cburch.logisim.mcp.McpInstructions;
@@ -78,6 +79,10 @@ public final class ImageTools {
 								+ "readable picture of a large circuit, down to 0.2 for an overview)"))
 						.opt("max_pixels", Schemas.integer("Refuse to draw more than this many pixels (default "
 								+ MAX_PIXELS + "), which is what stops one call from exhausting the heap"))
+						.opt("appearance", Schemas.bool("Draw the circuit's appearance - the symbol it is drawn as inside "
+								+ "another circuit - instead of its contents: the shapes, every port with its Pin's label, "
+								+ "and the rectangle an instance of the circuit occupies in its parent. Pass "
+								+ "'hide_port_labels' for the symbol exactly as Logisim draws it"))
 						.opt("print_view", Schemas.bool("Draw the print view instead: no state colours and no "
 								+ "grey backgrounds, as the export dialog's option of the same name"))
 						.opt("transparent", Schemas.bool("Leave the background transparent instead of white, "
@@ -98,11 +103,14 @@ public final class ImageTools {
 				int maxPixels = ctx.optInt("max_pixels", Integer.valueOf(MAX_PIXELS)).intValue();
 				boolean printView = ctx.optBool("print_view", false);
 				boolean transparent = ctx.optBool("transparent", false);
+				boolean appearance = ctx.optBool("appearance", false);
 
-				Bounds wanted = circuitBounds(circuit);
+				Bounds wanted = appearance ? Appearance.pictureArea(circuit) : circuitBounds(circuit);
 				if (wanted.getWidth() <= 0 || wanted.getHeight() <= 0) {
-					throw new McpException("circuit '" + circuit.getName() + "' is empty, so there is nothing to "
-							+ "draw: place something in it first");
+					throw new McpException(appearance
+							? "the appearance of circuit '" + circuit.getName() + "' is empty, so there is nothing to draw"
+							: "circuit '" + circuit.getName() + "' is empty, so there is nothing to draw: place "
+									+ "something in it first");
 				}
 				JsonElement region = ctx.optElement("region");
 				if (region != null && !region.isJsonNull()) {
@@ -124,7 +132,11 @@ public final class ImageTools {
 							+ "'region', or raise 'max_pixels' deliberately");
 				}
 
-				byte[] png = render(session, circuit, wanted, scale, printView, transparent, width, height);
+				java.util.List<String> problems = new java.util.ArrayList<String>();
+				byte[] png = appearance
+						? renderAppearance(circuit, wanted, scale, transparent, width, height, problems,
+								!ctx.optBool("hide_port_labels", false))
+						: render(session, circuit, wanted, scale, printView, transparent, width, height);
 				String base64 = Base64.getEncoder().encodeToString(png);
 
 				JsonObject image = new JsonObject();
@@ -137,6 +149,22 @@ public final class ImageTools {
 				JsonObject ret = new JsonObject();
 				ret.addProperty("circuit", circuit.getName());
 				ret.add("image", image);
+				if (appearance) {
+					ret.addProperty("appearance", Boolean.TRUE);
+					ret.addProperty("is_default", Boolean.valueOf(Appearance.isDefault(circuit)));
+					ret.add("ports", Appearance.portList(circuit));
+					ret.addProperty("drawn_note", "this is the symbol a parent draws for this circuit: the shapes "
+							+ "and text of its appearance, and the grey rectangle that is the area an instance occupies. "
+							+ "Each port's Pin label is drawn by this tool rather than by Logisim, and only for a port whose "
+							+ "name is not already written into the symbol as a text shape (so a symbol arranged with "
+							+ "'label_ports' shows each name once); 'hide_port_labels': true leaves them all out");
+					if (!problems.isEmpty()) {
+						ret.add("unpaintable", Json.array(problems));
+						ret.addProperty("unpaintable_note", "those objects could not be drawn into a picture: "
+								+ "Logisim's own Line shape needs a drag gesture to paint itself. They are still part "
+								+ "of the symbol, and the user sees them in Logisim's appearance view");
+					}
+				}
 				if (ctx.optBool("circuit_bounds", true)) {
 					ret.add("drawn", Json.array(Integer.valueOf(wanted.getX()), Integer.valueOf(wanted.getY()),
 							Integer.valueOf(wanted.getWidth()), Integer.valueOf(wanted.getHeight())));
@@ -148,10 +176,14 @@ public final class ImageTools {
 					ret.addProperty("saved", file.getAbsolutePath());
 					ret.addProperty("saved_bytes", Integer.valueOf(png.length));
 				}
-				ret.addProperty("hint", "this is a picture of the circuit as the user sees it. Use it to check "
-						+ "that the layout reads well, and logisim_circuit_nets to check what is connected to "
-						+ "what: a wire that looks joined on screen and a wire that is joined are not the same "
-						+ "thing. Pass 'region' and 'scale' to look closely at one part");
+				ret.addProperty("hint", appearance
+						? "this is the symbol as a parent draws it. Arrange it with logisim_circuit_appearance_edit "
+								+ "(move a port by its Pin's label, add a frame or a text), and check that every port is "
+								+ "where a wire would naturally leave it"
+						: "this is a picture of the circuit as the user sees it. Use it to check "
+								+ "that the layout reads well, and logisim_circuit_nets to check what is connected to "
+								+ "what: a wire that looks joined on screen and a wire that is joined are not the same "
+								+ "thing. Pass 'region' and 'scale' to look closely at one part");
 				return ret;
 			}
 		};
@@ -214,6 +246,39 @@ public final class ImageTools {
 		} finally {
 			g.dispose();
 		}
+		return encode(img);
+	}
+
+	/**
+	 * Draws a circuit's appearance - the symbol a parent shows for it - into a PNG, with no
+	 * window involved: the appearance is a drawing, and {@link Appearance#paint} lets every
+	 * object paint itself.
+	 */
+	private static byte[] renderAppearance(Circuit circuit, Bounds area, double scale, boolean transparent,
+			int width, int height, java.util.List<String> problems, boolean portLabels) {
+		BufferedImage img = new BufferedImage(width, height,
+				transparent ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB);
+		Graphics base = img.getGraphics();
+		Graphics g = base.create();
+		try {
+			if (!transparent) {
+				g.setColor(Color.WHITE);
+				g.fillRect(0, 0, width, height);
+			}
+			g.setColor(Color.BLACK);
+			if (g instanceof Graphics2D) {
+				((Graphics2D) g).scale(scale, scale);
+				((Graphics2D) g).translate(-area.getX(), -area.getY());
+			}
+			Appearance.paint(circuit, g, problems, portLabels);
+		} finally {
+			g.dispose();
+		}
+		return encode(img);
+	}
+
+	/** A PNG of a picture this tool drew. */
+	private static byte[] encode(BufferedImage img) {
 		try {
 			ByteArrayOutputStream out = new ByteArrayOutputStream();
 			if (!ImageIO.write(img, "PNG", out)) {
