@@ -571,8 +571,10 @@ public final class McpInstructions {
 			+ "window open; what it writes goes to the system temp directory and is deleted unless 'keep_files' is "
 			+ "true. Use it after building or packaging the server - a jar or exe that has lost its 'doc' folder can "
 			+ "only fail the 'docs' check - and when a tool behaves inexplicably. 'checks' runs a subset by name, and "
-			+ "'verbose' also returns the checks that passed. The checks are named: tools, catalogue, build, guard, "
-			+ "dry_run, simulate, nets, analysis, lint, memory, trace, save/load, recover, docs. A check whose turn "
+			+ "'verbose' also returns the checks that passed. The checks are named: tools, schemas, catalogue, build, "
+			+ "guard, dry_run, simulate, nets, analysis, lint, memory, trace, sim_determinism, wiring, splitter, "
+			+ "appearance, save/load, recover, docs - the reply names every one this build has, and a build with more "
+			+ "of them says so there. A check whose turn "
 			+ "has not come yet builds what it needs first, so a subset works: 'checks': [\"simulate\"] builds the "
 			+ "adder and runs its vectors.";
 

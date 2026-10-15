@@ -2962,8 +2962,12 @@ public class McpSession implements Closeable {
 		}
 		if (element.isJsonArray()) {
 			JsonArray array = element.getAsJsonArray();
-			if (array.size() < 2) {
-				throw new McpException("a coordinate must have two members, [x, y]");
+			// exactly two, not "at least two": a third member is a mistake, and a point that
+			// quietly means the first two of three is the kind of silent misreading this layer
+			// exists to prevent. The schemas cannot say so - see Schemas.point - so it is said here.
+			if (array.size() != 2) {
+				throw new McpException("a coordinate must have exactly two members, [x, y], but this one has "
+						+ array.size() + ": " + Json.compact(array));
 			}
 			return Location.create(array.get(0).getAsInt(), array.get(1).getAsInt());
 		}

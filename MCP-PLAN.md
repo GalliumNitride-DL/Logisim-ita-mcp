@@ -301,6 +301,24 @@ the process is stopped.
   against ports at `(0,50)`, `(0,150)`, `(400,50)` and `(200,50)`, a second call reporting `changed: 0` with
   `labels_note`, and `hide_port_labels` producing a different picture from the same symbol after a `reset`.
   `logisim_self_test` is eighteen checks, with the label placement and the second call inside `appearance`.
+- **A tool schema outside the strictest client's subset cost it the whole tool list** (2026-10-15).
+  Connecting the server to Claude Code answered `API Error: 400 Invalid schema for function
+  'mcp__logisim__logisim_sim_read': [{"type":"integer","description":"coordinate"}] is not of types
+  "boolean", "object"` and no client could use the server at all. The value is `items` of one parameter -
+  `logisim_sim_read`'s `locs`, a list of `[x, y]` points - written as a **list of schemas** (JSON Schema's
+  tuple form) where a single schema belongs: legal, accepted by every other client tried, refused by Claude,
+  and enough to invalidate all 56 tools. `Schemas.point` writes one schema now; the two member rule the tuple
+  would have carried moved into the description and into `McpSession.parseLocation`, which used to accept
+  `[100, 100, 0]` and quietly read the first two of three (now: "a coordinate must have exactly two members").
+  The schema surface was then narrowed on purpose to `type`, `description`, `properties`, `required`,
+  `items`, `enum`, `additionalProperties` (`minItems`/`maxItems` went with the tuple, because a keyword a
+  client does not know is the same failure again) and `logisim_self_test` gained a nineteenth check,
+  **`schemas`**, which walks all 245 schema objects of the 56 tools and fails on an unknown keyword, on a
+  value at a schema position that is not an object, on a `type` that is no JSON Schema type name, on a
+  `required` entry no property declares or on a property with no description. It caught a bug in itself on
+  its first run (it tested `required` names as if they were type names). Verified headless and from the
+  packaged exe: 19/19 checks, 56 tools, and an independent PowerShell walk of the published schemas
+  (`%TEMP%\mcp-test\schema-audit.ps1`) reporting 0 problems.
 - **`logisim_self_test` is implemented and green on 2.15.0.1**: fifteen checks in about 1.2 s
   (`ok: true, check_count: 14, passed: 14`), run against a second session so nothing of the open project
   is touched. Running it found a defect in its own trace fixture within the first minute - a D
@@ -511,7 +529,7 @@ run means something.
 
 ## 6. Immediate next steps
 
-1. **Commit the work.** Six verified rounds are uncommitted: the P0/P1 feedback round, the capability
+1. **Commit the work.** Seven verified rounds are uncommitted: the P0/P1 feedback round, the capability
    round (`logisim_self_test`, `logisim_component_memory`, `logisim_sim_trace`, the router search with the
    corner-on-port fix, the size and heap advice, and the three defects found while testing - the
    `Main.getVersion()` crash that stopped the server starting at all, the unresolvable component id after
@@ -521,9 +539,10 @@ run means something.
    round (the live-mode simulator race, per-vector `error` rows, the first stack frame in tool errors, and
    the `sim_determinism` check), the wiring/splitter round (the same-batch join warning, the splitter's
    rebuildable bit attributes with the `split` echo, the `[x, y]` component reference, and the `wiring` and
-   `splitter` checks), and the appearance follow-up round (the `parent_wiring` and port-order reports,
+   `splitter` checks), the appearance follow-up round (the `parent_wiring` and port-order reports,
    `label_ports` written inside the symbol and idempotent, the `frozen_note`, and the label half of the
-   `appearance` check). It is a large but
+   `appearance` check), and the client-compatibility round (the tuple `items` in `Schemas.point`, the
+   `[x, y]` parser rule, and the `schemas` check with the narrowed keyword set). It is a large but
    self-contained and verified change set; nothing should start on top of it.
 2. **Decide on the three library findings** ([`MCP-AGENT-FEEDBACK.md`](MCP-AGENT-FEEDBACK.md) §8.5). Two
    are worth a decision: a `RAM`'s data bus loses its name to a misplaced assignment (one-line swap, no

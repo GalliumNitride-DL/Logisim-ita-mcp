@@ -258,17 +258,19 @@ first edge and then the alternation, which is the check the self test pins it wi
 ### Is this server working? `logisim_self_test`
 
 Every failure this project has had was found by hand, with a throwaway script in the temp
-folder. `logisim_self_test` is that idea kept where it can run again: one call, eighteen
+folder. `logisim_self_test` is that idea kept where it can run again: one call, nineteen
 checks, about a second, and a one line answer per check with `ok` and the detail needed to see
 why not. It builds a small circuit of its own in a **second session**, so nothing of the open
 project is touched, changed, saved or closed - which is why it is safe to call at any moment,
 including in live mode with unsaved work on screen.
 
-The checks are `tools`, `catalogue`, `build`, `guard`, `dry_run`, `simulate`, `nets`,
+The checks are `tools`, `schemas`, `catalogue`, `build`, `guard`, `dry_run`, `simulate`, `nets`,
 `analysis`, `lint`, `memory`, `trace`, `sim_determinism`, `wiring`, `splitter`, `appearance`,
 `save/load`, `recover` and
 `docs`. Between
-them they pin the things that were once wrong and could go wrong again: that a Splitter reports
+them they pin the things that were once wrong and could go wrong again: that every tool this
+build promises is registered and that each one's argument schema is written the way the strictest
+clients require (see below), that a Splitter reports
 five named ports, that the Adder's Carry Out still comes back as an `output` with its
 `direction_note`, that a negative coordinate, an off grid position and a circuit placed inside
 itself are all refused, that a dry run changes nothing, that an 8-bit adder adds with the right
@@ -747,6 +749,35 @@ otherwise, so no file chooser ever appears without the user asking for one.
 
 Build the jar first with `mvn package -DskipTests`, then start the server from the
 MCP view in VS Code (or any MCP client).
+
+## Other clients, and the schema subset they accept
+
+Clients differ in how much of JSON Schema they accept, and the strictest ones refuse the
+**whole request** when a single tool's schema uses something outside their subset - the error
+names one tool and no reason, which reads like a fault in the server. Claude Code did exactly
+that when this server was first connected to it:
+
+```
+API Error: 400 Invalid schema for function 'mcp__logisim__logisim_sim_read':
+[{"type":"integer","description":"coordinate"}] is not of types "boolean", "object"
+```
+
+That value is the `items` of one parameter - `logisim_sim_read`'s `locs`, a list of `[x, y]`
+points - and it was a **list of schemas** where a single schema belongs. JSON Schema allows a
+list there (tuple validation), so the schema was legal and every other client had taken it;
+Claude does not, and that one parameter cost the entire tool list, all 56 tools with it.
+`Schemas.point` now writes one schema, and the two member rule the tuple would have carried is
+stated in the parameter's description and enforced by the parser, which refuses `[100, 100, 0]`
+by name instead of quietly reading the first two of three.
+
+What this server publishes is deliberately narrow, and `logisim_self_test`'s `schemas` check
+holds it there: `type`, `description`, `properties`, `required`, `items`, `enum`,
+`additionalProperties`, and nothing else. It fails on any other keyword, on a value at a schema
+position that is not an object (a list at `items` is the case that started this), on a `type`
+that is not a JSON Schema type name, on a `required` entry no property declares, and on a
+property without a description - because these descriptions are the whole of what an agent sees.
+Adding a keyword is a deliberate act: it goes into `SelfTest.ALLOWED_KEYWORDS` with the client
+it was tried with.
 
 ## Guarantees
 

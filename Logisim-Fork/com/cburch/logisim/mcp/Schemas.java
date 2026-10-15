@@ -104,16 +104,27 @@ public final class Schemas {
 		return ret;
 	}
 
-	/** A {@code [x, y]} pair in Logisim coordinates. */
+	/**
+	 * A {@code [x, y]} pair in Logisim coordinates.
+	 *
+	 * <p>
+	 * Two things here are deliberate. {@code items} is a <i>single</i> schema, not a two element
+	 * list of them: JSON Schema allows a list there (tuple validation), and an array of one item is
+	 * accepted by some clients' validators, but the strictest refuse the whole request when they
+	 * meet it - Claude answers {@code Invalid schema for function 'mcp__logisim__logisim_sim_read':
+	 * [{"type":"integer","description":"coordinate"}] is not of types "boolean", "object"},
+	 * which names no tool of ours and so reads like a fault in the client. And the length is stated
+	 * in the description rather than by {@code minItems}/{@code maxItems}, so that this schema uses
+	 * no keyword outside the small set every client is known to accept: a keyword a client does not
+	 * know costs it the whole tool list, which is the same failure again. The requirement is
+	 * enforced at run time by the parser, which names it when it is broken.
+	 * </p>
+	 */
 	public static JsonObject point(String description) {
 		JsonObject ret = new JsonObject();
 		ret.addProperty("type", "array");
-		ret.addProperty("description", description);
-		JsonArray items = new JsonArray();
-		items.add(type("integer", "coordinate"));
-		ret.add("items", items);
-		ret.addProperty("minItems", 2);
-		ret.addProperty("maxItems", 2);
+		ret.addProperty("description", description + " (exactly two integers, x then y)");
+		ret.add("items", type("integer", "coordinate"));
 		return ret;
 	}
 

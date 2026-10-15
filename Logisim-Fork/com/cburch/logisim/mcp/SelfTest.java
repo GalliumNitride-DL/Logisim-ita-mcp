@@ -16,6 +16,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -43,6 +44,20 @@ import com.google.gson.JsonObject;
  * </p>
  */
 public final class SelfTest {
+	/** The seven JSON Schema type names, as one comma-separated list to search in. */
+	private static final String TYPE_NAMES = "object,array,string,number,integer,boolean,null";
+
+	/**
+	 * The keywords this server is willing to publish. Everything here is a keyword every client
+	 * this has been tried with accepts; anything else has to be added deliberately, with the client
+	 * that was tried written down beside it.
+	 */
+	private static final String ALLOWED_KEYWORDS = "type,description,properties,required,items,enum,"
+			+ "additionalProperties";
+
+	/** The keywords that hold a list of schemas. */
+	private static final String[] UNION_KEYWORDS = { "anyOf", "oneOf", "allOf" };
+
 	/** The tools a build of this server is supposed to have. */
 	private static final String[] EXPECTED_TOOLS = { "logisim_status", "logisim_undo", "logisim_circuit_info",
 			"logisim_file_new", "logisim_file_open", "logisim_file_recover", "logisim_file_save",
@@ -119,6 +134,12 @@ public final class SelfTest {
 			@Override
 			public void run() {
 				checkTools();
+			}
+		});
+		check("schemas", "every tool's argument schema is one even the strictest client accepts", new Body() {
+			@Override
+			public void run() {
+				checkSchemas();
 			}
 		});
 		check("catalogue", "the component catalogue reports what it promises: a splitter's pins, the corrected "
@@ -243,6 +264,151 @@ public final class SelfTest {
 		}
 		expect(missing.isEmpty(), "this build does not register " + missing.size() + " tool(s): " + missing
 				+ "; the registered ones number " + tools.size());
+	}
+
+	/**
+	 * Every tool's argument schema, checked for the shape the strictest clients insist on.
+	 *
+	 * <p>
+	 * Claude's API validates the whole tool list before it will use it, and refuses the request
+	 * when one schema falls outside its subset of JSON Schema. A tuple at {@code items} - a list
+	 * of schemas where JSON Schema allows one - is one such case, and it cost the entire tool
+	 * list, with an error that names a tool of ours and nothing else: {@code Invalid schema for
+	 * function 'mcp__logisim__logisim_sim_read': [{"type":"integer","description":"coordinate"}] is
+	 * not of types "boolean", "object"}. These are the rules that subset implies, checked here
+	 * rather than discovered by a user whose client will not connect.
+	 * </p>
+	 */
+	private void checkSchemas() {
+		List<String> problems = new ArrayList<String>();
+		for (JsonElement element : tools.definitions()) {
+			JsonObject definition = element.getAsJsonObject();
+			String name = text(definition, "name");
+			if (text(definition, "description") == null) {
+				problems.add(name + ": no description");
+			}
+			JsonElement schema = definition.get("inputSchema");
+			if (schema == null || !schema.isJsonObject()) {
+				problems.add(name + ": inputSchema is not an object");
+				continue;
+			}
+			if (!"object".equals(text(schema.getAsJsonObject(), "type"))) {
+				problems.add(name + ": the schema's type is " + Json.compact(schema.getAsJsonObject().get("type"))
+						+ ", not \"object\"");
+			}
+			schemaProblems(schema.getAsJsonObject(), name, problems);
+		}
+		expect(problems.isEmpty(), problems.size() + " tool schema problem(s), and a client that checks its "
+				+ "schemas refuses the whole tool list for any one of them: " + problems);
+	}
+
+	/**
+	 * Collects what is wrong with one schema and everything below it. A schema is an object or a
+	 * boolean, so wherever a schema belongs - a property, {@code items}, an entry of
+	 * {@code anyOf} - a list of schemas is a defect however legal JSON Schema considers it;
+	 * {@code type} is a type name or a list of them; {@code required} has to name declared
+	 * properties; and every property says what it is for, because these descriptions are all an
+	 * agent has to go on.
+	 */
+	private static void schemaProblems(JsonObject schema, String where, List<String> problems) {
+		for (Map.Entry<String, JsonElement> entry : schema.entrySet()) {
+			if (("," + ALLOWED_KEYWORDS + ",").indexOf("," + entry.getKey() + ",") < 0) {
+				problems.add(where + "." + entry.getKey() + ": is a keyword outside the small set every client is "
+						+ "known to accept (" + ALLOWED_KEYWORDS + "); a keyword a client does not know costs it the "
+						+ "whole tool list");
+			}
+		}
+		JsonElement type = schema.get("type");
+		if (type != null) {
+			if (type.isJsonArray()) {
+				for (JsonElement one : type.getAsJsonArray()) {
+					if (!isTypeName(one)) {
+						problems.add(where + ": type " + Json.compact(one) + " is not a JSON Schema type name "
+								+ "(one of " + TYPE_NAMES + ")");
+					}
+				}
+			} else if (!isTypeName(type)) {
+				problems.add(where + ": type is " + Json.compact(type) + ", not a type name or a list of names "
+						+ "(one of " + TYPE_NAMES + ")");
+			}
+		}
+
+		JsonElement items = schema.get("items");
+		if (items != null) {
+			if (items.isJsonArray()) {
+				problems.add(where + ".items: is a list of schemas, which the strictest clients refuse as invalid "
+						+ "(write one schema; minItems and maxItems are what fix a length)");
+			} else if (items.isJsonObject()) {
+				schemaProblems(items.getAsJsonObject(), where + ".items", problems);
+			} else {
+				problems.add(where + ".items: is " + Json.compact(items) + ", which is not a schema");
+			}
+		}
+
+		for (int i = 0; i < UNION_KEYWORDS.length; i++) {
+			JsonElement options = schema.get(UNION_KEYWORDS[i]);
+			if (options == null) {
+				continue;
+			}
+			if (!options.isJsonArray()) {
+				problems.add(where + "." + UNION_KEYWORDS[i] + ": is " + Json.compact(options)
+						+ ", not a list of schemas");
+				continue;
+			}
+			int index = 0;
+			for (JsonElement option : options.getAsJsonArray()) {
+				String here = where + "." + UNION_KEYWORDS[i] + "[" + index + "]";
+				if (option.isJsonObject()) {
+					schemaProblems(option.getAsJsonObject(), here, problems);
+				} else {
+					problems.add(here + ": is " + Json.compact(option) + ", which is not a schema");
+				}
+				index++;
+			}
+		}
+
+		JsonObject properties = schema.get("properties") != null && schema.get("properties").isJsonObject()
+				? schema.getAsJsonObject("properties")
+				: null;
+		JsonElement required = schema.get("required");
+		if (required != null) {
+			if (!required.isJsonArray()) {
+				problems.add(where + ".required: is " + Json.compact(required) + ", not a list of names");
+			} else {
+				for (JsonElement one : required.getAsJsonArray()) {
+					if (!isString(one) || properties == null || properties.get(one.getAsString()) == null) {
+						problems.add(where + ".required: names " + Json.compact(one) + ", which the properties do "
+								+ "not declare");
+					}
+				}
+			}
+		}
+
+		if (properties == null) {
+			return;
+		}
+		for (Map.Entry<String, JsonElement> entry : properties.entrySet()) {
+			String name = where + "." + entry.getKey();
+			if (!entry.getValue().isJsonObject()) {
+				problems.add(name + ": the schema of a property is " + Json.compact(entry.getValue())
+						+ ", which is not an object");
+				continue;
+			}
+			if (entry.getValue().getAsJsonObject().get("description") == null) {
+				problems.add(name + ": no description");
+			}
+			schemaProblems(entry.getValue().getAsJsonObject(), name, problems);
+		}
+	}
+
+	/** True for a JSON Schema type name given as a string. */
+	private static boolean isTypeName(JsonElement element) {
+		return isString(element) && ("," + TYPE_NAMES + ",").indexOf("," + element.getAsString() + ",") >= 0;
+	}
+
+	/** True for a JSON string. */
+	private static boolean isString(JsonElement element) {
+		return element != null && element.isJsonPrimitive() && element.getAsJsonPrimitive().isString();
 	}
 
 	private void checkCatalogue() throws Exception {
