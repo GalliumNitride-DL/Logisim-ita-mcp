@@ -1,3 +1,7 @@
+# AIC2026 AI+开源方向作品
+
+Logisim MCP：AI辅助数字逻辑电路设计
+
 # Logisim ITA
 Logisim is a digital circuit simulator, [originally available here](https://www.cburch.com/logisim/).<br><br>
 This is an italian fork based on the original Logisim version.<br>
